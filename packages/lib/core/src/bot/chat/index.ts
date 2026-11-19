@@ -114,9 +114,11 @@ export function extractImageFileID(message: Telegram.Message): string | null {
         const length = message.photo.length;
         const sizeIndex = Math.max(0, Math.min(offset >= 0 ? offset : length + offset, length - 1));
         return message.photo[sizeIndex]?.file_id;
-    } else if (message.document && message.document.thumbnail) {
-        return message.document.thumbnail.file_id;
-    }
+    } else if (message.document?.mime_type?.startsWith('image/')) {
+    return message.document.file_id;
+}
+return null;
+}
     return null;
 }
 

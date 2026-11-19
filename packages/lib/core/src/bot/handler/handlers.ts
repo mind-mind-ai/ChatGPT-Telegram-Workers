@@ -417,7 +417,9 @@ export class MessageFilter implements MessageHandler {
         }
         if (message.photo) {
             return null; // 图片消息
-        }
+        if (message.document?.mime_type?.startsWith('image/')) {
+    return null; // Image sent as a file
+}}
         throw new Error('Not supported message type');
     };
 }
