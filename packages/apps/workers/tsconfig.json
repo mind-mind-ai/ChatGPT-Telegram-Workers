@@ -6,6 +6,13 @@
         "outDir": "./dist",
         "emitDeclarationOnly": true
     },
-    "references": [{ "path": "../../lib/core" }],
+    "references": [
+        {
+            "path": "../../lib/sandbox"
+        },
+        {
+            "path": "../../lib/core"
+        }
+    ],
     "include": ["src/**/*"]
 }

@@ -20,6 +20,9 @@ await build({
     // neutral 平台必须显式声明 mainFields,否则连工作区包的 package.json#main 都不会被读取
     mainFields: ['module', 'main'],
     conditions: ['workerd', 'worker', 'browser', 'import', 'module', 'default'],
+    // workerd provides these modules at runtime. They are not npm packages, so
+    // esbuild must leave them as imports rather than trying to resolve them.
+    external: ['cloudflare:workers', 'node:*'],
     sourcemap: true,
     logLevel: 'info',
 });

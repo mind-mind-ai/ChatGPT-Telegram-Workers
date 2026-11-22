@@ -17,8 +17,35 @@
     // can resolve `@chatgpt-telegram-workers/*` without a separate build step.
     // `-w` runs the root script when wrangler is invoked from a subpackage.
     "build": { "command": "pnpm -w run build:workers" },
-    // nodejs_compat is enabled by default at this date, no compatibility flags needed.
+    // nodejs_compat is required by @cloudflare/sandbox (Files uses node:os).
     "compatibility_date": "2026-08-04",
+    "compatibility_flags": ["nodejs_compat"],
+
+    // Sandbox container, managed by one Durable Object per user/repository/session.
+    // This makes the Worker require the Workers Paid plan; it is not deployed by
+    // the repository build/test commands.
+    "containers": [
+        {
+            "name": "sandbox",
+            "class_name": "SandboxDurableObject",
+            "scheduling_policy": "durable_object",
+            "images": {
+                "sandbox": {
+                    "dockerfile": "./sandbox/Dockerfile",
+                },
+            },
+        },
+    ],
+    "durable_objects": {
+        "bindings": [{ "name": "SANDBOX", "class_name": "SandboxDurableObject" }],
+    },
+    "exports": {
+        "SandboxDurableObject": {
+            "type": "durable-object",
+            "storage": "sqlite",
+            "container": "sandbox",
+        },
+    },
 
     // Never delete dashboard variables on deploy (secrets are always preserved).
     "keep_vars": true,

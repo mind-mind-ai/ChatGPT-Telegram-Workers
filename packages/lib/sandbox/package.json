@@ -12,6 +12,10 @@
         "./cloudflare": {
             "types": "./dist/cloudflare.d.ts",
             "import": "./dist/cloudflare.js"
+        },
+        "./durable-object": {
+            "types": "./dist/durable-object.d.ts",
+            "import": "./dist/durable-object.js"
         }
     },
     "scripts": {

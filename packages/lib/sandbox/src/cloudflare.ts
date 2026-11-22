@@ -1,8 +1,4 @@
-import {
-    Files,
-    SandboxFileError as CloudflareSandboxFileError,
-    type SandboxDirectoryEntry as CloudflareDirectoryEntry,
-} from '@cloudflare/sandbox';
+import { Files, SandboxFileError as CloudflareSandboxFileError } from '@cloudflare/sandbox';
 import { createAbortScope, raceWithAbort } from './abort';
 import {
     SandboxAbortError,
@@ -92,7 +88,7 @@ export interface CloudflareFiles {
     rename(source: string, destination: string, options?: { signal?: AbortSignal }): Promise<void>;
     remove(path: string, options?: { recursive?: boolean; force?: boolean; signal?: AbortSignal }): Promise<void>;
     mkdir(path: string, options?: { recursive?: boolean; signal?: AbortSignal }): Promise<void>;
-    readDirectory(path: string, options?: { signal?: AbortSignal }): Promise<CloudflareDirectoryEntry[]>;
+    readDirectory(path: string, options?: { signal?: AbortSignal }): Promise<Array<{ name: string; type: string }>>;
 }
 
 export interface CloudflareSandboxState {

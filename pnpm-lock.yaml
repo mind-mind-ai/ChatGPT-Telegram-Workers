@@ -233,6 +233,9 @@ importers:
       '@chatgpt-telegram-workers/core':
         specifier: workspace:*
         version: link:../../lib/core
+      '@chatgpt-telegram-workers/sandbox':
+        specifier: workspace:*
+        version: link:../../lib/sandbox
 
   packages/lib/agent:
     dependencies:

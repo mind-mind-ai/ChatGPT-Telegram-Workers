@@ -9,6 +9,7 @@
         "deploy": "wrangler deploy --config ${WRANGLER_PATH}"
     },
     "dependencies": {
-        "@chatgpt-telegram-workers/core": "workspace:*"
+        "@chatgpt-telegram-workers/core": "workspace:*",
+        "@chatgpt-telegram-workers/sandbox": "workspace:*"
     }
 }

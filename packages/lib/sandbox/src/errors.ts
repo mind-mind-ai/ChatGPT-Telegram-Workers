@@ -1,5 +1,6 @@
 export type SandboxErrorCode =
     | 'invalid-workspace'
+    | 'not-initialized'
     | 'invalid-path'
     | 'not-found'
     | 'not-directory'
@@ -12,7 +13,8 @@ export type SandboxErrorCode =
     | 'snapshot'
     | 'destroyed'
     | 'unsupported'
-    | 'protocol';
+    | 'protocol'
+    | 'internal';
 
 export class SandboxError extends Error {
     readonly name: string = 'SandboxError';
