@@ -3,6 +3,7 @@ export * from './chat';
 export * from './coding';
 export * from './documents';
 export * from './errors';
+export * from './github';
 export * from './providers';
 export * from './runtime';
 export * from './stream';

@@ -26,6 +26,15 @@ class Environment {
     /** 可选:公网 HTTPS 地址,设置后优先于 KV 配置里的 publicBaseUrl */
     PUBLIC_BASE_URL = '';
 
+    // -- GitHub read-only integration (never exposed to the sandbox) --
+    GITHUB_APP_ID = '';
+    GITHUB_APP_PRIVATE_KEY = '';
+    GITHUB_INSTALLATION_ID = '';
+    GITHUB_ALLOWED_REPOSITORIES = '';
+    GITHUB_ALLOWED_REPOSITORIES_BY_USER = '';
+    GITHUB_INSTALLATION_IDS = '';
+    GITHUB_API_BASE_URL = '';
+
     // -- 平台绑定 --
     AI_BINDING: WorkersAIBinding | null = null;
     API_GUARD: APIGuardBinding | null = null;
@@ -78,6 +87,20 @@ class Environment {
             `${source.PUBLIC_BASE_URL}`.trim() !== ''
         ) {
             this.PUBLIC_BASE_URL = `${source.PUBLIC_BASE_URL}`.trim().replace(/\/+$/, '');
+        }
+        for (const key of [
+            'GITHUB_APP_ID',
+            'GITHUB_APP_PRIVATE_KEY',
+            'GITHUB_INSTALLATION_ID',
+            'GITHUB_ALLOWED_REPOSITORIES',
+            'GITHUB_ALLOWED_REPOSITORIES_BY_USER',
+            'GITHUB_INSTALLATION_IDS',
+            'GITHUB_API_BASE_URL',
+        ] as const) {
+            const value = source[key];
+            if (typeof value === 'string' && value.trim() !== '') {
+                this[key] = value;
+            }
         }
     }
 
