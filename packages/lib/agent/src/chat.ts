@@ -1,5 +1,7 @@
 import type { Message } from '@chatgpt-telegram-workers/ai';
 import type { AppConfig } from '@chatgpt-telegram-workers/config';
+import type { AgentRunResult, CompleteWithToolsOptions } from './runtime';
+import type { ToolRegistry } from './tools';
 import type { ChatAgent, HistoryModifier, StreamHandler } from './types';
 import { ENV } from '@chatgpt-telegram-workers/config';
 
@@ -104,4 +106,38 @@ export async function requestCompletionsFromLLM(
         await ENV.DATABASE.put(historyKey, JSON.stringify(next)).catch(console.error);
     }
     return text;
+}
+
+/**
+ * Non-streaming attachment flow: runs the tool loop and stores only the user
+ * message and final answer in history. Tool results (document text, web pages)
+ * and image bytes are deliberately not persisted.
+ */
+export async function requestAgentCompletionsFromLLM(
+    message: Message | null,
+    historyKey: string,
+    config: AppConfig,
+    agent: ChatAgent,
+    tools: ToolRegistry,
+    options?: CompleteWithToolsOptions,
+): Promise<AgentRunResult> {
+    if (!historyKey) {
+        throw new Error('History key not found');
+    }
+    if (!message) {
+        throw new Error('Message is empty');
+    }
+
+    const { autoTrimHistory, maxHistoryLength, historyImagePlaceholder } = config.settings;
+    const historyDisabled = autoTrimHistory && maxHistoryLength <= 0;
+    const history = await loadHistory(historyKey, config);
+
+    const result = await agent.completeWithTools([...history, message], tools, options);
+
+    if (!historyDisabled) {
+        const stored = stripImages(message, historyImagePlaceholder || '[image omitted]');
+        const next: Message[] = [...history, stored, { role: 'assistant', content: result.text }];
+        await ENV.DATABASE.put(historyKey, JSON.stringify(next)).catch(console.error);
+    }
+    return result;
 }

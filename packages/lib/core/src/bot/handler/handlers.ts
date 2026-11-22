@@ -8,7 +8,7 @@ import { ENV } from '@chatgpt-telegram-workers/config';
 import { createTelegramBotAPI, MessageSender } from '@chatgpt-telegram-workers/telegram';
 import { isGroupChat } from '../auth';
 import { loadChatRoleWithContext } from '../command/auth';
-import { chatWithMessage, extractUserMessageItem } from '../chat';
+import { chatWithAttachments, chatWithMessage, extractUserMessageItem } from '../chat';
 import { handleCommandMessage } from '../command';
 
 /**
@@ -418,6 +418,9 @@ export class MessageFilter implements MessageHandler {
         if (message.photo) {
             return null; // 图片消息
         }
+        if (message.document) {
+            return null; // 文档消息;ChatHandler 会校验并回复不支持的类型
+        }
         throw new Error('Not supported message type');
     };
 }
@@ -434,6 +437,16 @@ export class CommandHandler implements MessageHandler {
 
 export class ChatHandler implements MessageHandler {
     handle = async (message: Telegram.Message, context: WorkerContext): Promise<Response | null> => {
+        const reply = message.reply_to_message;
+        const hasDirectAttachment = Boolean(message.document || message.photo?.length);
+        const hasReplyDocument = Boolean(reply?.document) && !reply?.from?.is_bot;
+        const hasReplyPhoto =
+            Boolean(reply?.photo?.length) && !reply?.from?.is_bot && ENV.CONFIG.settings.extraMessageContext;
+
+        if (hasDirectAttachment || hasReplyDocument || hasReplyPhoto) {
+            return chatWithAttachments(message, context);
+        }
+
         const params = await extractUserMessageItem(message, context);
         return chatWithMessage(message, params, context, null);
     };
