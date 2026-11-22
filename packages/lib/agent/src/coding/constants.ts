@@ -1,0 +1,8 @@
+export const CODING_TOOL_PERMISSION = 'coding';
+
+export const DEFAULT_CODING_LIST_ENTRIES = 200;
+export const MAX_CODING_LIST_ENTRIES = 1_000;
+export const DEFAULT_CODING_READ_BYTES = 256 * 1024;
+export const MAX_CODING_READ_BYTES = 2 * 1024 * 1024;
+export const MAX_CODING_WRITE_BYTES = 2 * 1024 * 1024;
+export const MAX_CODING_EDIT_BYTES = 2 * 1024 * 1024;

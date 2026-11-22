@@ -12,6 +12,7 @@
     "dependencies": {
         "@chatgpt-telegram-workers/ai": "workspace:*",
         "@chatgpt-telegram-workers/config": "workspace:*",
+        "@chatgpt-telegram-workers/sandbox": "workspace:*",
         "fflate": "0.8.3",
         "unpdf": "2.2.1"
     },

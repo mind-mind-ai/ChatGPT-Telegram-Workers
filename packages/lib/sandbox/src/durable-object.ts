@@ -73,6 +73,26 @@ export interface SandboxDurableStatus {
     activeOperations: number;
 }
 
+/** The RPC surface exposed by a sandbox Durable Object stub. */
+export interface SandboxDurableObjectStub {
+    initialize(scope: SandboxScope): Promise<SandboxWorkspace>;
+    getStatus(): Promise<SandboxDurableStatus>;
+    exec(command: string, options?: SandboxDurableExecOptions): Promise<SandboxExecResult>;
+    readFile(path: string, options?: SandboxDurableFileOptions): Promise<Uint8Array>;
+    writeFile(path: string, content: SandboxFileContent, options?: SandboxDurableFileOptions): Promise<void>;
+    rename(from: string, to: string, options?: SandboxDurableFileOptions): Promise<void>;
+    remove(path: string, options?: SandboxDurableRemoveOptions): Promise<void>;
+    list(path?: string, options?: SandboxDurableListOptions): Promise<SandboxListResult>;
+    snapshot(options?: SandboxDurableSnapshotOptions): Promise<SandboxSnapshot>;
+    destroy(): Promise<void>;
+    cancelAll(): Promise<number>;
+}
+
+/** The subset of a Durable Object namespace binding used by the sandbox adapter. */
+export interface SandboxNamespaceBinding {
+    getByName(name: string): SandboxDurableObjectStub;
+}
+
 function defaultClientFactory(
     state: SandboxDurableObjectState,
     options: Omit<CloudflareSandboxClientOptions, 'container'>,

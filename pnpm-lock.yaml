@@ -245,6 +245,9 @@ importers:
       '@chatgpt-telegram-workers/config':
         specifier: workspace:*
         version: link:../config
+      '@chatgpt-telegram-workers/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       fflate:
         specifier: 0.8.3
         version: 0.8.3

@@ -8,6 +8,10 @@ export const DEFAULT_MAX_TOOL_RESULT_CHARS = 20_000;
 export interface ToolAccessContext {
     userId?: string;
     chatId?: string;
+    /** Repository identity for coding/sandbox tools, e.g. `owner/repo`. */
+    repository?: string;
+    /** Session identity for coding/sandbox tools. Defaults to `default`. */
+    sessionId?: string;
     permissions?: readonly string[];
     /** Admin bypasses `requiredPermissions`, but not the tool's own `canUse` policy. */
     isAdmin?: boolean;

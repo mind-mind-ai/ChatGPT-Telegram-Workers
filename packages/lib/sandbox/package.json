@@ -16,6 +16,10 @@
         "./durable-object": {
             "types": "./dist/durable-object.d.ts",
             "import": "./dist/durable-object.js"
+        },
+        "./durable-object-client": {
+            "types": "./dist/durable-object-client.d.ts",
+            "import": "./dist/durable-object-client.js"
         }
     },
     "scripts": {

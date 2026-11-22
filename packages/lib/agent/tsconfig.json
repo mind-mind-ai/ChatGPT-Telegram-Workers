@@ -7,6 +7,16 @@
         "types": ["node", "vitest/globals"],
         "outDir": "./dist"
     },
-    "references": [{ "path": "../ai" }, { "path": "../config" }],
+    "references": [
+        {
+            "path": "../sandbox"
+        },
+        {
+            "path": "../ai"
+        },
+        {
+            "path": "../config"
+        }
+    ],
     "include": ["src/**/*"]
 }

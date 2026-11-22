@@ -1,5 +1,6 @@
 export * from './agent';
 export * from './chat';
+export * from './coding';
 export * from './documents';
 export * from './errors';
 export * from './providers';

@@ -1,4 +1,5 @@
 export * from './abort';
+export * from './durable-object-client';
 export * from './errors';
 export * from './limits';
 export * from './mock';
