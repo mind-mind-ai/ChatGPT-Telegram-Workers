@@ -39,6 +39,8 @@ class Environment {
     AI_BINDING: WorkersAIBinding | null = null;
     API_GUARD: APIGuardBinding | null = null;
     DATABASE: KVNamespaceBinding = null as any;
+    /** Cloudflare SANDBOX Durable Object namespace; typed by the sandbox package. */
+    SANDBOX: unknown = null;
 
     // -- 运行时 --
     I18N: I18n = loadI18n();
@@ -64,6 +66,9 @@ class Environment {
         }
         if (source.API_GUARD) {
             this.API_GUARD = source.API_GUARD;
+        }
+        if (source.SANDBOX) {
+            this.SANDBOX = source.SANDBOX;
         }
         if (source.TELEGRAM_TOKEN) {
             this.TELEGRAM_TOKEN = `${source.TELEGRAM_TOKEN}`.trim();

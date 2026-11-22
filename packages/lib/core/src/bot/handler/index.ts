@@ -4,6 +4,7 @@ import { ENV } from '@chatgpt-telegram-workers/config';
 import { configureTelegram, Update2MessageHandler } from '@chatgpt-telegram-workers/telegram';
 import { WorkerContext } from '../context';
 import { GroupMention } from './group';
+import { CodingCallbackHandler, CodingMessageHandler } from './coding';
 import {
     AccessFilter,
     CallbackQueryHandler,
@@ -25,6 +26,7 @@ const SHARE_HANDLER: UpdateHandler[] = [
     // 过滤非白名单用户, 提前过滤减少KV消耗
     new AccessFilter(),
     // InlineKeyboard 回调(/models 切换模型等),必须在消息转换之前接管
+    new CodingCallbackHandler(),
     new CallbackQueryHandler(),
     // 消息处理
     new Update2MessageHandler([
@@ -38,6 +40,8 @@ const SHARE_HANDLER: UpdateHandler[] = [
         new SaveLastMessage(),
         // 处理命令消息
         new CommandHandler(),
+        // 有活动编码会话时,普通文本进入编码代理而不是普通聊天历史
+        new CodingMessageHandler(),
         // 与llm聊天
         new ChatHandler(),
     ]),

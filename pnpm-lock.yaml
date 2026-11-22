@@ -296,6 +296,9 @@ importers:
       '@chatgpt-telegram-workers/plugins':
         specifier: workspace:*
         version: link:../plugins
+      '@chatgpt-telegram-workers/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@chatgpt-telegram-workers/telegram':
         specifier: workspace:*
         version: link:../telegram

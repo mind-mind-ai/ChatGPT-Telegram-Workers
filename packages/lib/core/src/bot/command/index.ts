@@ -9,6 +9,7 @@ import { isGroupChat } from '../auth';
 import { loadChatRoleWithContext } from './auth';
 import { applyConfigShortcut, isConfigShortcutValue, parseConfigShortcut } from './env-shortcut';
 import { MENU_COMMANDS } from './menu-commands';
+import { CodeCommandHandler, CodeStatusCommandHandler, CodeStopCommandHandler } from './coding';
 import {
     AdminCommandHandler,
     EchoCommandHandler,
@@ -66,6 +67,9 @@ const SYSTEM_COMMANDS: CommandHandler[] = [
     new VersionCommandHandler(),
     new SystemCommandHandler(),
     new ModelsCommandHandler(),
+    new CodeCommandHandler(),
+    new CodeStatusCommandHandler(),
+    new CodeStopCommandHandler(),
     new HelpCommandHandler(),
     new SetEnvCommandHandler(),
     new SetEnvsCommandHandler(),

@@ -6,6 +6,7 @@ export interface GitHubRepositoryRef {
 
 export interface GitHubAccessContext {
     userId: string;
+    chatId?: string;
     repository?: string;
     sessionId?: string;
     metadata?: Record<string, unknown>;

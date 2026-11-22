@@ -17,6 +17,7 @@
         "@chatgpt-telegram-workers/config": "workspace:*",
         "@chatgpt-telegram-workers/i18n": "workspace:*",
         "@chatgpt-telegram-workers/plugins": "workspace:*",
+        "@chatgpt-telegram-workers/sandbox": "workspace:*",
         "@chatgpt-telegram-workers/telegram": "workspace:*",
         "@chatgpt-telegram-workers/web": "workspace:*",
         "telegram-bot-api-types": "^10.2.0"

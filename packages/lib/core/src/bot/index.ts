@@ -1,6 +1,7 @@
 // core 的 bot 应用层:Telegram 更新的业务编排 + 中间件/命令实现
 export * from './auth';
 export * from './chat';
+export * from './coding';
 export * from './command';
 export * from './context';
 export { handleUpdate } from './handler';
