@@ -6,6 +6,7 @@ export * from './runtime';
 export * from './stream';
 export * from './tools';
 export * from './types';
+export * from './web';
 export * from './workersai';
 
 // 提供商差异(协议元数据、模型列表)已下沉到 ai 包;这里转发以保持既有导入路径
