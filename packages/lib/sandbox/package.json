@@ -1,0 +1,28 @@
+{
+    "name": "@chatgpt-telegram-workers/sandbox",
+    "version": "1.10.7",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./cloudflare": {
+            "types": "./dist/cloudflare.d.ts",
+            "import": "./dist/cloudflare.js"
+        }
+    },
+    "scripts": {
+        "build": "tsc -b",
+        "clean": "rm -rf dist && rm -rf node_modules && rm -rf tsconfig.tsbuildinfo",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@cloudflare/sandbox": "1.0.3"
+    },
+    "devDependencies": {
+        "vitest": "^4.1.12"
+    }
+}

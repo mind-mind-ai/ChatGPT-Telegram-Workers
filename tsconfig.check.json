@@ -11,6 +11,7 @@
         { "path": "packages/lib/plugins" },
         { "path": "packages/lib/ai" },
         { "path": "packages/lib/config" },
+        { "path": "packages/lib/sandbox" },
         { "path": "packages/lib/agent" },
         { "path": "packages/lib/core" },
         { "path": "packages/test/mocks" },
