@@ -84,6 +84,10 @@ Set these as Worker secrets or environment variables. Never commit them.
 | `CODING_APPROVAL_TTL_MS`              | Optional                 | Approval lifetime in milliseconds. Defaults to 15 minutes; minimum 60 seconds. |
 | `SANDBOX_INTERNET`                    | Optional                 | Set `true` to let the coding sandbox download packages. Default `false`.       |
 
+> `GITHUB_APP_PRIVATE_KEY` is a secret. Never commit the `.pem` file; the
+> repository ignores `*.pem` and `*.key`. Paste the full PEM into the Worker
+> secret field, or use `\n` escapes if the dashboard stores it on one line.
+
 Example per-user authorization:
 
 ```json
@@ -149,9 +153,10 @@ await runtime.run(messages, registry, {
 });
 ```
 
-`repo_info` and `repo_checkout` only accept the repository that matches the
-sandbox workspace. `repo_list` lists the repositories allowed for the caller.
-The write path is not exposed as a model tool: only the approval callback can
+`repo_info` only accepts the repository that matches the sandbox workspace.
+`repo_list` lists the repositories allowed for the caller. The host performs
+the checkout itself; `repo_checkout` is not exposed to the coding agent. The
+write path is also not exposed as a model tool: only the approval callback can
 call `GitHubService.writeChanges`.
 
 ## Tests

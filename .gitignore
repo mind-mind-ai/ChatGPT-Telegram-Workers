@@ -157,6 +157,9 @@ wrangler.deploy.jsonc
 /packages/apps/server/package-docker.json
 .env*.local
 .dev.vars
+# Never commit GitHub App private keys or other local key material
+*.pem
+*.key
 /.zcode/plans
 /.agents/skills
 /.claude/skills

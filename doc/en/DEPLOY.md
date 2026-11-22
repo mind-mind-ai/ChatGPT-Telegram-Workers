@@ -1,6 +1,8 @@
 # Deploy to Cloudflare Workers
 
-Cloudflare Workers is the default and easiest way to run this bot: no server and no domain required (you get a free `*.workers.dev` domain). The chat bot works on the free plan. The coding-agent sandbox uses Cloudflare Containers, which requires a Workers Paid plan, and building the sandbox image requires Docker.
+Cloudflare Workers is the default and easiest way to run this bot: no server and no domain required (you get a free `*.workers.dev` domain). The chat bot works on the free plan. The coding-agent sandbox uses Cloudflare Containers, which requires a Workers Paid plan. A local `wrangler deploy` needs Docker to build the sandbox image; Cloudflare Workers Builds can build the Dockerfile in its own environment.
+
+> For the Phase 6 iPad checklist, including the exact order of Cloudflare, GitHub and Telegram steps, see [Finnish Phase 6 iPad checklist](../fi/DEPLOY_LIVE_TEST.md).
 
 > For Vercel / local / Docker deployments, see [Deploy to Vercel, Local, Docker](DEPLOY_OTHERS.md).
 >
@@ -58,7 +60,7 @@ The command prints a KV namespace **id** — copy it.
 
 ### 2. Configure `wrangler.jsonc`
 
-The repository ships a [wrangler.jsonc](../../wrangler.jsonc). For CLI deploys, fill in the KV namespace id and add a `vars` block with your bot credentials:
+The repository ships a [wrangler.jsonc](../../wrangler.jsonc). For CLI deploys, fill in the KV namespace id. Do **not** commit the bot token or the GitHub App private key into this file:
 
 ```jsonc
 {
@@ -68,16 +70,24 @@ The repository ships a [wrangler.jsonc](../../wrangler.jsonc). For CLI deploys, 
     "ai": { "binding": "AI" },
     "kv_namespaces": [{ "binding": "DATABASE", "id": "<your-kv-namespace-id>" }],
     "vars": {
-        "TELEGRAM_TOKEN": "<your-bot-token>",
         "ADMIN_ID": "<your-telegram-user-id>",
-        // "ADMIN_PASSWORD": "change-me" // optional, enables password login for /admin outside Telegram
+        // "PUBLIC_BASE_URL": "https://your-worker.example.workers.dev" // optional
     },
 }
 ```
 
 The `ai` binding is already in the shipped file — keep it if you want to use Cloudflare Workers AI models without an account id and API token. Bindings are reconciled from this file on every `wrangler deploy`, so adding the binding **only** in the dashboard is not enough: the next CLI deploy removes it.
 
-> Only `TELEGRAM_TOKEN` (required), `ADMIN_ID` and `ADMIN_PASSWORD` (optional) exist. Everything else — AI providers, prompts, permissions, plugins — is configured in the admin panel, see [Configuration](CONFIG.md).
+Set runtime secrets after the first deploy, or in the dashboard under *Settings → Variables and Secrets*:
+
+```shell
+pnpm wrangler secret put TELEGRAM_TOKEN
+# Optional:
+pnpm wrangler secret put ADMIN_PASSWORD
+pnpm wrangler secret put TELEGRAM_SECRET_TOKEN
+```
+
+`ADMIN_ID` is not sensitive and can stay in `vars`. AI providers, prompts, permissions and plugins are configured in the admin panel, see [Configuration](CONFIG.md). To enable `/code`, also set the GitHub App and coding variables described in [GitHub integration](GITHUB.md); `SANDBOX_INTERNET` stays unset or `false` for the first test.
 
 ### 3. Build and deploy
 
@@ -94,7 +104,7 @@ Cloudflare builds and deploys the Worker automatically whenever you sync your fo
 1. **Fork this repository** on GitHub.
 2. **Create the KV namespace** in the Cloudflare dashboard: *Storage & Databases → KV → Create namespace*. Copy its **id**.
 3. **Create the Worker from your repo**: Cloudflare dashboard → *Compute (Workers)* → *Create* → *Import a repository*, authorize GitHub and pick your fork.
-   - Production branch: `master`
+   - Production branch: your default branch (`master` for upstream). For a separate Phase 6 test Worker, use the test branch instead.
    - Build command: leave it empty — the deploy command builds everything it needs
    - Deploy command: `pnpm run deploy:builds`
    - Non-production branch deploy command: `pnpm run deploy:preview` — required if you push preview branches; the default `npx wrangler versions upload` would skip the KV namespace id injection and fail
@@ -114,6 +124,10 @@ The Worker is deployed but won't respond until it knows your bot token. In the W
 | `TELEGRAM_TOKEN` | Secret | your bot token from BotFather |
 | `ADMIN_ID` | Secret | your Telegram user id |
 | `ADMIN_PASSWORD` | Secret | optional, password login for `/admin` outside Telegram |
+| `PUBLIC_BASE_URL` | Variable | optional, public HTTPS base URL |
+| `TELEGRAM_SECRET_TOKEN` | Secret | optional, Telegram webhook secret |
+
+To use the coding agent, add the GitHub App and coding variables from [GitHub integration](GITHUB.md). The coding sandbox needs the Workers Paid plan and the first container deployment can take several minutes. Keep `SANDBOX_INTERNET` unset or `false` for the first test; enable it only for repositories that must download packages.
 
 Then **retry the build** (or push any commit) so the new variables take effect. The committed config declares `keep_vars: true` and contains no `vars`, so dashboard variables survive every deploy.
 
@@ -130,6 +144,10 @@ To ship updates, sync your fork with the upstream repository — Cloudflare rebu
 
 If you don't want to run anything locally — this is the only deployment that uses the prebuilt [`dist/index.js`](../../dist/index.js):
 
+> **Coding is not available in this option.** The copy/paste Worker has no
+> `SANDBOX` or `CODING_SESSION` Durable Objects and no Containers. Use Option B
+> or Option C for `/code`.
+
 1. Open [Cloudflare Workers](https://dash.cloudflare.com/?to=/:account/workers) and create a new Worker (*Create* → *Start with Hello World* → *Deploy*), then click *Edit code*.
 2. Paste the full content of [`dist/index.js`](../../dist/index.js) into the editor and *Deploy*.
 3. Go to the Worker's **Settings**:
@@ -141,7 +159,7 @@ If you don't want to run anything locally — this is the only deployment that u
 
 ## Initialize
 
-Open your Worker URL — `https://<worker-name>.<subdomain>.workers.dev/` — and click **Bind Webhook** on the home page (or just visit `/init` once). This registers the Telegram webhook, the command menu (`/new`, `/redo`, `/img`, `/admin`, `/models`, `/help`), and the chat menu button (the button next to the message input opens the admin panel as a Mini App).
+Open your Worker URL — `https://<worker-name>.<subdomain>.workers.dev/` — and click **Bind Webhook** on the home page (or just visit `/init` once). This registers the Telegram webhook, the command menu (`/new`, `/redo`, `/img`, `/admin`, `/models`, `/code`, `/code_status`, `/code_stop`, `/help`), and the chat menu button (the button next to the message input opens the admin panel as a Mini App).
 
 > The detected domain is saved into the admin panel config on the first bind — no extra setup is needed for the default `*.workers.dev` domain. For a custom domain, set it as `publicBaseUrl` in the admin panel or as the `PUBLIC_BASE_URL` environment variable.
 

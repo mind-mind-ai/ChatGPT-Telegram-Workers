@@ -325,6 +325,29 @@ describe('SandboxDurableObject', () => {
         expect(container.destroyed).toBe(true);
     });
 
+    it('enables sandbox internet only for an explicit true env value', async () => {
+        const scope = { userId: 'alice', repository: 'owner/repo', sessionId: 's1' };
+        const workspace = await createSandboxWorkspace(scope);
+
+        for (const [env, expected] of [
+            [{}, false],
+            [{ SANDBOX_INTERNET: 'false' }, false],
+            [{ SANDBOX_INTERNET: '0' }, false],
+            [{ SANDBOX_INTERNET: 'true' }, true],
+        ] as const) {
+            const options: Parameters<SandboxClientFactory>[1][] = [];
+            const object = new SandboxDurableObject(createState(workspace.name), env, {
+                clientFactory: (_state, clientOptions) => {
+                    options.push(clientOptions);
+                    return new FakeClient(clientOptions.workspace);
+                },
+            });
+            await object.initialize(scope);
+            await object.exec('pwd');
+            expect(options[0]?.enableInternet).toBe(expected);
+        }
+    });
+
     it('keeps the mock adapter usable through the Durable Object contract', async () => {
         const workspace = await createSandboxWorkspace({ userId: 'alice', repository: 'owner/repo' });
         const object = new SandboxDurableObject(

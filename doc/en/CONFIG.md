@@ -25,6 +25,11 @@ Bindings (Cloudflare / runtime):
 
 > All previously supported environment variables (`OPENAI_API_KEY`, `TELEGRAM_AVAILABLE_TOKENS`, `LOCK_USER_CONFIG_KEYS`, `CUSTOM_COMMAND_*`, `PLUGIN_COMMAND_*`, …) are **removed**. Configure providers and options in the admin panel instead.
 
+The optional GitHub and coding variables (`GITHUB_*`, `CODING_APPROVAL_TTL_MS`,
+`SANDBOX_INTERNET`) are documented in [GitHub integration](GITHUB.md).
+`SANDBOX_INTERNET` defaults to `false`; enable it only when a repository must
+download packages.
+
 ## 2. Admin panel
 
 Open `https://<your-domain>/admin`.
