@@ -223,3 +223,96 @@ describe('CodingMessageHandler', () => {
         expect(failed.texts[0]).toContain('already working');
     });
 });
+
+describe('CodingCallbackHandler approvals', () => {
+    const changeSet = {
+        repository: 'octo/repo',
+        baseRef: 'main',
+        baseCommitSha: 'a'.repeat(40),
+        diffHash: '1'.repeat(64),
+        diff: 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        files: [],
+        summary: '1 file changed',
+        createdAt: 1_000,
+    };
+    const approval = {
+        id: 'approval1',
+        nonce: 'nonce1',
+        status: 'pending' as const,
+        sessionId: 'session-1',
+        jobId: 'job-1',
+        userId: '10',
+        chatId: '10',
+        diffHash: '1'.repeat(64),
+        changeKey: 'approval1',
+        createdAt: 1_000,
+        expiresAt: 2_000,
+    };
+
+    it('sends a review document when the diff is too large for a Telegram message', async () => {
+        const fake = callbackReply();
+        const review = vi.fn(async () => ({
+            approval,
+            changeSet: { ...changeSet, diff: '+line\n'.repeat(1_000) },
+        }));
+        const handler = new CodingCallbackHandler({
+            coordinator: coordinatorFactory(fakeCoordinator({ reviewApproval: review })),
+            github: fakeGithub(),
+            reply: fake.factory,
+        });
+        await handler.handle(callbackUpdate('code:approval:review:approval1:nonce1'), context());
+        expect(review).toHaveBeenCalledWith({
+            userId: '10',
+            chatId: '10',
+            approvalId: 'approval1',
+            nonce: 'nonce1',
+        });
+        expect(fake.documents).toHaveLength(1);
+        expect(new TextDecoder().decode(fake.documents[0].content)).toContain('+line');
+        expect(fake.answers).toContain('Opening approved changes');
+    });
+
+    it('approves and rejects only for the original private-chat user', async () => {
+        const fake = callbackReply();
+        const approve = vi.fn(async () => ({
+            approval: {
+                ...approval,
+                status: 'completed' as const,
+                branch: 'telegram-agent/x',
+                commitSha: 'b'.repeat(40),
+            },
+            branch: 'telegram-agent/x',
+            commitSha: 'b'.repeat(40),
+        }));
+        const handler = new CodingCallbackHandler({
+            coordinator: coordinatorFactory(fakeCoordinator({ approveChanges: approve })),
+            github: fakeGithub(),
+            reply: fake.factory,
+        });
+        await handler.handle(callbackUpdate('code:approval:approve:approval1:nonce1'), context());
+        expect(approve).toHaveBeenCalled();
+        expect(fake.texts.at(-1)).toContain('Approved changes were written to GitHub');
+
+        const wrongUser = callbackReply();
+        const wrongApprove = vi.fn();
+        await new CodingCallbackHandler({
+            coordinator: coordinatorFactory(fakeCoordinator({ approveChanges: wrongApprove })),
+            github: fakeGithub(),
+            reply: wrongUser.factory,
+        }).handle(callbackUpdate('code:approval:approve:approval1:nonce1', 11, 10), context());
+        expect(wrongApprove).not.toHaveBeenCalled();
+        expect(wrongUser.answers[0]).toContain('does not belong');
+    });
+
+    it('rejects changes through the same one-time callback', async () => {
+        const fake = callbackReply();
+        const reject = vi.fn(async () => ({ approval: { ...approval, status: 'rejected' as const } }));
+        await new CodingCallbackHandler({
+            coordinator: coordinatorFactory(fakeCoordinator({ rejectChanges: reject })),
+            github: fakeGithub(),
+            reply: fake.factory,
+        }).handle(callbackUpdate('code:approval:reject:approval1:nonce1'), context());
+        expect(reject).toHaveBeenCalled();
+        expect(fake.texts.at(-1)).toContain('rejected');
+    });
+});

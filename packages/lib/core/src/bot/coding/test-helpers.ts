@@ -57,6 +57,7 @@ export function context(): WorkerContext {
 export function fakeReply() {
     const texts: string[] = [];
     const keyboards: Telegram.InlineKeyboardMarkup[] = [];
+    const documents: { filename: string; content: Uint8Array; caption?: string }[] = [];
     const answers: string[] = [];
     const reply: CodingReply = {
         sendText: async text => {
@@ -68,11 +69,15 @@ export function fakeReply() {
             keyboards.push(keyboard);
             return new Response('OK', { status: 200 });
         },
+        sendDocument: async (filename, content, caption) => {
+            documents.push({ filename, content, ...(caption ? { caption } : {}) });
+            return new Response('OK', { status: 200 });
+        },
         answerCallback: async text => {
             answers.push(text ?? '');
         },
     };
-    return { reply, texts, keyboards, answers };
+    return { reply, texts, keyboards, documents, answers };
 }
 
 export async function sandboxFor(scope: SandboxScope): Promise<MockSandboxClient> {
@@ -102,11 +107,21 @@ export function fakeGithub(
             return {
                 repository: { owner, name, fullName: repository },
                 ref: 'main',
+                commitSha: 'a'.repeat(40),
                 filesWritten: 1,
                 bytesWritten: 5,
                 skippedFiles: 0,
             };
         },
+        getBranchHead: async () => ({ ref: 'refs/heads/main', sha: 'a'.repeat(40) }),
+        writeChanges: async () => ({
+            repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+            baseRef: 'main',
+            baseSha: 'a'.repeat(40),
+            branch: 'telegram-agent/test',
+            commitSha: 'b'.repeat(40),
+            filesChanged: 1,
+        }),
     } as unknown as GitHubService;
 }
 
@@ -204,6 +219,15 @@ export function fakeCoordinator(overrides: Partial<CodingSessionCoordinator> = {
                 job: durableJob({ kind: 'instruction', status: 'queued', instruction: 'work' }),
             }),
         stopSession: async () => durableSession({ status: 'cancelled', cancellationRequested: true }),
+        reviewApproval: async () => {
+            throw new Error('No approval in fake coordinator');
+        },
+        approveChanges: async () => {
+            throw new Error('No approval in fake coordinator');
+        },
+        rejectChanges: async () => {
+            throw new Error('No approval in fake coordinator');
+        },
         ...overrides,
     };
 }

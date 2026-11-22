@@ -11,6 +11,7 @@ export interface GitHubEnvironment {
     GITHUB_INSTALLATION_ID?: string;
     GITHUB_ALLOWED_REPOSITORIES?: string;
     GITHUB_ALLOWED_REPOSITORIES_BY_USER?: string;
+    GITHUB_WRITE_ALLOWED_REPOSITORIES?: string;
     GITHUB_INSTALLATION_IDS?: string;
     GITHUB_API_BASE_URL?: string;
 }
@@ -82,7 +83,7 @@ function parseInstallationIds(value: string | undefined): Record<string, string>
     return result;
 }
 
-/** Builds a read-only GitHub service from operator-provided environment values. */
+/** Builds a GitHub service from operator-provided environment values. */
 export function createGitHubServiceFromEnv(
     env: GitHubEnvironment,
     options: GitHubServiceFromEnvOptions = {},
@@ -114,10 +115,24 @@ export function createGitHubServiceFromEnv(
                   ...(options.now ? { now: options.now } : {}),
               })
             : undefined;
+    const writeTokenProvider =
+        appId && privateKey
+            ? new GitHubAppTokenProvider({
+                  appId,
+                  privateKey,
+                  contentsPermission: 'write',
+                  fetchImpl: options.fetchImpl,
+                  apiBaseUrl: env.GITHUB_API_BASE_URL ?? DEFAULT_GITHUB_API_BASE_URL,
+                  timeoutMs: options.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS,
+                  ...(options.now ? { now: options.now } : {}),
+              })
+            : undefined;
 
     return new GitHubService({
         authorization,
         ...(tokenProvider ? { tokenProvider } : {}),
+        ...(writeTokenProvider ? { writeTokenProvider } : {}),
+        writeRepositories: parseRepositoryList(env.GITHUB_WRITE_ALLOWED_REPOSITORIES),
         ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
         ...(env.GITHUB_API_BASE_URL ? { apiBaseUrl: env.GITHUB_API_BASE_URL } : {}),
         ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),

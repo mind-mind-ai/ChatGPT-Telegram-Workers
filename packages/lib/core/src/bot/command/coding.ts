@@ -81,6 +81,19 @@ function formatStatus(session: CodingDurableSession): string {
     if (session.cancellationRequested) {
         lines.push('Cancellation: requested');
     }
+    if (session.approval) {
+        lines.push(`Approval: ${session.approval.status}`);
+        lines.push(`Approval expires: ${new Date(session.approval.expiresAt).toISOString()}`);
+        if (session.approval.branch) {
+            lines.push(`Approved branch: ${session.approval.branch}`);
+        }
+        if (session.approval.commitSha) {
+            lines.push(`Approved commit: ${session.approval.commitSha}`);
+        }
+        if (session.approval.error) {
+            lines.push(`Approval error: ${session.approval.error}`);
+        }
+    }
     return lines.join('\n');
 }
 

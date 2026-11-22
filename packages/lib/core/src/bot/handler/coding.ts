@@ -7,6 +7,9 @@ import { createMessageReply, createReplyForUpdate, type CodingReply } from '../c
 import {
     CodingSessionError,
     codingErrorMessage,
+    parseCodingApprovalCallbackData,
+    type CodingApprovalResult,
+    type CodingChangeSet,
     type CodingCoordinatorFactory,
     type CodingDurableSession,
 } from '../coding/types';
@@ -54,6 +57,59 @@ function isActive(session: CodingDurableSession): boolean {
     return ['queued', 'running', 'awaiting_input', 'cancelling'].includes(session.status);
 }
 
+async function sendReview(reply: CodingReply, changeSet: CodingChangeSet): Promise<void> {
+    const caption = [
+        'Proposed changes',
+        changeSet.summary,
+        `Repository: ${changeSet.repository}`,
+        `Base: ${changeSet.baseRef} @ ${changeSet.baseCommitSha.slice(0, 12)}`,
+    ].join('\n');
+    if (changeSet.diff.length > 3_500) {
+        await reply.sendDocument(
+            `changes-${changeSet.diffHash.slice(0, 12)}.diff`,
+            new TextEncoder().encode(changeSet.diff),
+            caption,
+        );
+        return;
+    }
+    await reply.sendText(`${caption}\n\n${changeSet.diff}`);
+}
+
+function formatApprovalStatus(approval: CodingApprovalResult['approval']): string {
+    switch (approval.status) {
+        case 'completed':
+            return `Approved changes were already written to GitHub.\nBranch: ${approval.branch ?? 'unknown'}\nCommit: ${approval.commitSha ?? 'unknown'}`;
+        case 'approved':
+        case 'applying':
+            return 'The approved changes are being written to GitHub.';
+        case 'failed':
+            return `GitHub write failed: ${approval.error ?? 'unknown error'}\nThe proposed changes are preserved in this session.`;
+        case 'rejected':
+            return 'These changes were rejected. Nothing was written to GitHub.';
+        case 'expired':
+            return 'This approval expired. Nothing was written to GitHub.';
+        case 'stale':
+            return 'These changes no longer match the sandbox. Nothing was written to GitHub.';
+        default:
+            return 'No reviewable changes are available for this approval.';
+    }
+}
+
+function formatApprovalResult(result: CodingApprovalResult): string {
+    if (result.approval.status === 'completed') {
+        return [
+            'Approved changes were written to GitHub.',
+            `Branch: ${result.branch ?? result.approval.branch ?? 'unknown'}`,
+            `Commit: ${result.commitSha ?? result.approval.commitSha ?? 'unknown'}`,
+            'Nothing was merged, deployed or written to the default branch.',
+        ].join('\n');
+    }
+    if (result.approval.status === 'failed') {
+        return `${formatApprovalStatus(result.approval)}\nThe change set is still stored for review.`;
+    }
+    return formatApprovalStatus(result.approval);
+}
+
 export class CodingCallbackHandler implements UpdateHandler {
     constructor(private readonly deps?: CodingCallbackDependencies) {}
 
@@ -73,17 +129,55 @@ export class CodingCallbackHandler implements UpdateHandler {
             await reply.answerCallback('Coding sessions are only available in private chats');
             return ok();
         }
+        if (`${userId}` !== `${chatId}`) {
+            await reply.answerCallback('This coding action does not belong to you');
+            return ok();
+        }
+        const identity = { userId: `${userId}`, chatId: `${chatId}` };
+        const approvalCallback = parseCodingApprovalCallbackData(callback.data);
+        if (approvalCallback) {
+            try {
+                const deps = this.deps ?? defaultCallbackDependencies();
+                const coordinator = deps.coordinator(identity.userId, identity.chatId);
+                const request = {
+                    userId: identity.userId,
+                    chatId: identity.chatId,
+                    approvalId: approvalCallback.approvalId,
+                    nonce: approvalCallback.nonce,
+                };
+                if (approvalCallback.action === 'review') {
+                    await reply.answerCallback('Opening approved changes');
+                    const review = await coordinator.reviewApproval(request);
+                    if (review.changeSet) {
+                        await sendReview(reply, review.changeSet);
+                    } else {
+                        await reply.sendText(formatApprovalStatus(review.approval));
+                    }
+                    return ok();
+                }
+                await reply.answerCallback(
+                    approvalCallback.action === 'approve' ? 'Approving changes' : 'Rejecting changes',
+                );
+                const result =
+                    approvalCallback.action === 'approve'
+                        ? await coordinator.approveChanges(request)
+                        : await coordinator.rejectChanges(request);
+                await reply.sendText(formatApprovalResult(result));
+            } catch (error) {
+                await reply.answerCallback('Approval failed');
+                if (error instanceof CodingSessionError) {
+                    await reply.sendText(`Approval failed: ${error.message}`);
+                } else {
+                    await reply.sendText(`Approval failed: ${codingErrorMessage(error)}`);
+                }
+            }
+            return ok();
+        }
         const match = /^code:repo:(\d+)$/.exec(callback.data);
         if (!match) {
             await reply.answerCallback('Unknown coding action');
             return ok();
         }
-        if (`${userId}` !== `${chatId}`) {
-            await reply.answerCallback('This repository selection does not belong to you');
-            return ok();
-        }
-        const identity = { userId: `${userId}`, chatId: `${chatId}` };
-
         try {
             const deps = this.deps ?? defaultCallbackDependencies();
             const coordinator = deps.coordinator(identity.userId, identity.chatId);

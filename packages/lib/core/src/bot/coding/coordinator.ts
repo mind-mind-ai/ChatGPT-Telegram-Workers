@@ -1,4 +1,7 @@
 import type {
+    CodingApprovalRequest,
+    CodingApprovalResult,
+    CodingApprovalReview,
     CodingDurableSession,
     CodingInstructionInput,
     CodingSessionCoordinator,
@@ -11,6 +14,9 @@ export interface CodingSessionDurableStub {
     createSession(input: CodingSessionCreateInput): Promise<CodingDurableSession>;
     enqueueInstruction(input: CodingInstructionInput): Promise<CodingDurableSession>;
     stopSession(userId: string, chatId: string): Promise<CodingDurableSession | null>;
+    reviewApproval(input: CodingApprovalRequest): Promise<CodingApprovalReview>;
+    approveChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult>;
+    rejectChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult>;
 }
 
 export interface CodingSessionNamespaceBinding {
@@ -39,6 +45,18 @@ export class DurableCodingSessionCoordinator implements CodingSessionCoordinator
 
     stopSession(userId: string, chatId: string): Promise<CodingDurableSession | null> {
         return this.stub.stopSession(userId, chatId);
+    }
+
+    reviewApproval(input: CodingApprovalRequest): Promise<CodingApprovalReview> {
+        return this.stub.reviewApproval(input);
+    }
+
+    approveChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        return this.stub.approveChanges(input);
+    }
+
+    rejectChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        return this.stub.rejectChanges(input);
     }
 }
 

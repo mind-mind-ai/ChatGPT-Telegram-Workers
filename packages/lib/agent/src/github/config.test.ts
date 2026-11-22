@@ -27,6 +27,28 @@ describe('createGitHubServiceFromEnv', () => {
         expect(bob).toEqual([expect.objectContaining({ fullName: 'octo/bob', installationId: '100' })]);
     });
 
+    it('keeps the write allowlist separate from the read allowlist', async () => {
+        const service = createGitHubServiceFromEnv({
+            GITHUB_ALLOWED_REPOSITORIES: 'octo/public',
+            GITHUB_WRITE_ALLOWED_REPOSITORIES: 'octo/private',
+        });
+        const repositories = await service.listAuthorizedRepositories({ userId: 'alice' });
+        expect(repositories.map(repository => repository.fullName)).toEqual(['octo/public']);
+        await expect(
+            service.writeChanges(
+                'octo/public',
+                { userId: 'alice' },
+                {
+                    baseRef: 'main',
+                    expectedBaseSha: 'a'.repeat(40),
+                    branchName: 'telegram-agent/test',
+                    message: 'test',
+                    changes: [{ path: 'a.txt', status: 'added', contentBase64: 'eA==' }],
+                },
+            ),
+        ).rejects.toMatchObject({ code: 'permission' });
+    });
+
     it('rejects invalid configuration without requiring real credentials', () => {
         expect(() => createGitHubServiceFromEnv({ GITHUB_ALLOWED_REPOSITORIES_BY_USER: 'not-json' })).toThrow(
             GitHubError,

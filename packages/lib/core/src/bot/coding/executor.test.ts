@@ -113,7 +113,7 @@ describe('CodingAgentExecutor', () => {
         expect(CODING_SYSTEM_PROMPT).toContain('Run the relevant tests');
         expect(CODING_SYSTEM_PROMPT).toContain('Inspect your own diff');
         expect(CODING_SYSTEM_PROMPT).toContain('Never claim a test passed unless it actually ran successfully');
-        expect(CODING_SYSTEM_PROMPT).toContain('GitHub access is read-only');
+        expect(CODING_SYSTEM_PROMPT).toContain('GitHub access from the sandbox is read-only');
         expect(CODING_SYSTEM_PROMPT).toContain('Never create commits');
         expect(CODING_SYSTEM_PROMPT).toContain('Never bypass permissions');
         expect(CODING_SYSTEM_PROMPT).toContain('Never print, request or copy secrets');

@@ -22,7 +22,8 @@ ADMIN_PASSWORD=
 # the admin panel. When unset the worker discovers its own host on /init.
 # PUBLIC_BASE_URL=
 
-# Optional: read-only GitHub App integration. See doc/en/GITHUB.md.
+# Optional: GitHub App integration. Reads are enabled by default; writes need
+# an explicit write allowlist and Contents: Read and write. See doc/en/GITHUB.md.
 # Private repositories require the App id, private key and installation id.
 # GITHUB_APP_ID=
 # GITHUB_APP_PRIVATE_KEY=
@@ -31,3 +32,7 @@ ADMIN_PASSWORD=
 # GITHUB_ALLOWED_REPOSITORIES_BY_USER={"123456789":["owner/repo"]}
 # GITHUB_INSTALLATION_IDS={"owner/private-repo":"123456"}
 # GITHUB_API_BASE_URL=https://api.github.com
+# Separate opt-in allowlist for approval-gated writes.
+# GITHUB_WRITE_ALLOWED_REPOSITORIES=owner/repo
+# Approval lifetime in milliseconds (default 15 minutes).
+# CODING_APPROVAL_TTL_MS=900000

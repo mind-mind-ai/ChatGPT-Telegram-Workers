@@ -1,3 +1,4 @@
+export * from './changes';
 export * from './coordinator';
 export * from './durable-object';
 export * from './executor';

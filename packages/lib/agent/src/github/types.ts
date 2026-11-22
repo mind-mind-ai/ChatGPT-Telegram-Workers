@@ -53,3 +53,43 @@ export interface GitHubCheckoutResult {
     bytesWritten: number;
     skippedFiles: number;
 }
+
+export type GitHubFileChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+
+export interface GitHubFileChangeInput {
+    path: string;
+    previousPath?: string;
+    status: GitHubFileChangeStatus;
+    /** Base64-encoded new content. Required unless the file is deleted. */
+    contentBase64?: string;
+    /** Expected SHA-256 of the new content, hex encoded. */
+    sha256?: string;
+}
+
+export interface GitHubWriteChangesInput {
+    baseRef: string;
+    expectedBaseSha: string;
+    branchName: string;
+    message: string;
+    changes: readonly GitHubFileChangeInput[];
+}
+
+export interface GitHubBranchHead {
+    ref: string;
+    sha: string;
+}
+
+export interface GitHubWriteChangesResult {
+    repository: GitHubRepositoryRef;
+    baseRef: string;
+    baseSha: string;
+    branch: string;
+    commitSha: string;
+    filesChanged: number;
+}
+
+export interface GitHubCommitInfo {
+    sha: string;
+    treeSha: string;
+    parentShas: string[];
+}

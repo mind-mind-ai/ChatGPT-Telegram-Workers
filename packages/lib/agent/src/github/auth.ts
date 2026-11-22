@@ -29,6 +29,8 @@ export interface GitHubTokenProvider {
 export interface GitHubAppTokenProviderOptions {
     appId: string | number;
     privateKey: string;
+    /** Contents permission requested for the repository-scoped installation token. */
+    contentsPermission?: 'read' | 'write';
     fetchImpl?: typeof fetch;
     apiBaseUrl?: string;
     timeoutMs?: number;
@@ -142,7 +144,7 @@ export async function createGitHubAppJwt(options: {
     return `${unsigned}.${base64UrlEncode(new Uint8Array(signature))}`;
 }
 
-/** Exchanges a GitHub App JWT for a repository-scoped read-only installation token. */
+/** Exchanges a GitHub App JWT for a repository-scoped installation token. */
 export class GitHubAppTokenProvider implements GitHubTokenProvider {
     private readonly appId: string;
     private readonly privateKey: string;
@@ -150,6 +152,7 @@ export class GitHubAppTokenProvider implements GitHubTokenProvider {
     private readonly apiBaseUrl: string;
     private readonly timeoutMs: number;
     private readonly now: () => number;
+    private readonly contentsPermission: 'read' | 'write';
     private readonly cache = new Map<string, GitHubInstallationToken>();
 
     constructor(options: GitHubAppTokenProviderOptions) {
@@ -159,6 +162,7 @@ export class GitHubAppTokenProvider implements GitHubTokenProvider {
         this.apiBaseUrl = (options.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL).replace(/\/+$/, '');
         this.timeoutMs = options.timeoutMs ?? DEFAULT_GITHUB_TIMEOUT_MS;
         this.now = options.now ?? Date.now;
+        this.contentsPermission = options.contentsPermission ?? 'read';
     }
 
     async getInstallationToken(
@@ -169,7 +173,7 @@ export class GitHubAppTokenProvider implements GitHubTokenProvider {
         if (!/^\d{1,20}$/.test(installationId)) {
             throw new GitHubError('invalid-config', 'GitHub installation id must be numeric');
         }
-        const cacheKey = `${installationId}:${repositoryKey(repository)}`;
+        const cacheKey = `${installationId}:${repositoryKey(repository)}:${this.contentsPermission}`;
         const cached = this.cache.get(cacheKey);
         if (cached && cached.expiresAt - TOKEN_REFRESH_MARGIN_MS > this.now()) {
             return cached;
@@ -193,7 +197,7 @@ export class GitHubAppTokenProvider implements GitHubTokenProvider {
                 },
                 body: JSON.stringify({
                     repositories: [repository.name],
-                    permissions: { contents: 'read' },
+                    permissions: { contents: this.contentsPermission },
                 }),
             },
         );

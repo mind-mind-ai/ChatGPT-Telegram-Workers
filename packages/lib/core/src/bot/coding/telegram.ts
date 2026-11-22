@@ -38,6 +38,7 @@ export async function sendLongText(reply: CodingReply, text: string): Promise<Re
 export interface CodingReply {
     sendText(text: string): Promise<Response>;
     sendKeyboard(text: string, keyboard: Telegram.InlineKeyboardMarkup): Promise<Response>;
+    sendDocument(filename: string, content: Uint8Array, caption?: string): Promise<Response>;
     answerCallback(text?: string): Promise<void>;
 }
 
@@ -64,6 +65,13 @@ export function createMessageReply(token: string, message: Telegram.Message): Co
                 text,
                 reply_markup: keyboard,
             }),
+        sendDocument: (filename, content, caption) =>
+            createTelegramBotAPI(token).sendDocument({
+                chat_id: message.chat.id,
+                document: new Blob([content as unknown as ArrayBuffer], { type: 'text/plain' }),
+                filename,
+                ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+            } as Telegram.SendDocumentParams),
         answerCallback: async () => undefined,
     };
 }
@@ -79,6 +87,13 @@ export function createCallbackReply(token: string, callback: Telegram.CallbackQu
                 text,
                 reply_markup: keyboard,
             }),
+        sendDocument: (filename, content, caption) =>
+            api.sendDocument({
+                chat_id: sender.context.chat_id,
+                document: new Blob([content as unknown as ArrayBuffer], { type: 'text/plain' }),
+                filename,
+                ...(caption ? { caption: caption.slice(0, 1024) } : {}),
+            } as Telegram.SendDocumentParams),
         answerCallback: async text => {
             await api
                 .answerCallbackQuery({

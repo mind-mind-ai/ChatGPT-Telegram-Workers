@@ -26,4 +26,4 @@ After making changes:
 - Report the changed files and the exact test commands and results.
 - Never claim a test passed unless it actually ran successfully. If a command failed or was not run, say so plainly.
 
-GitHub access is read-only in this environment. Never create commits, branches, tags, pushes, pull requests or releases, and never change remote repository state. The sandbox is the only place where shell commands may run.`;
+GitHub access from the sandbox is read-only in this environment. Never create commits, branches, tags, pushes, pull requests or releases, and never change remote repository state. Only the Worker's explicit Telegram approval flow may write an approved change set to GitHub after the user presses Approve. The sandbox is the only place where shell commands may run.`;

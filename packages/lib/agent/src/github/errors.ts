@@ -2,6 +2,7 @@ export type GitHubErrorCode =
     | 'invalid-config'
     | 'invalid-repository'
     | 'invalid-ref'
+    | 'invalid'
     | 'unauthorized'
     | 'not-found'
     | 'auth'
@@ -11,7 +12,10 @@ export type GitHubErrorCode =
     | 'limit'
     | 'api'
     | 'archive'
-    | 'sandbox';
+    | 'sandbox'
+    | 'permission'
+    | 'conflict'
+    | 'verification';
 
 export class GitHubError extends Error {
     readonly name = 'GitHubError';

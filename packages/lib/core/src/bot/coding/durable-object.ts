@@ -2,11 +2,20 @@ import { createGitHubServiceFromEnv, loadChatLLM } from '@chatgpt-telegram-worke
 import { ENV } from '@chatgpt-telegram-workers/config';
 import { createDurableObjectSandboxClient, type SandboxNamespaceBinding } from '@chatgpt-telegram-workers/sandbox';
 import { CodingAgentExecutor, type CodingWorkspaceSession } from './executor';
-import { CodingHistoryStore } from './history';
+import { CodingChangeStore, CodingHistoryStore } from './history';
 import { CodingTelegramNotifier, type CodingJobNotifier } from './notifier';
+import type * as Telegram from 'telegram-bot-api-types';
 import {
     CodingSessionError,
     codingErrorMessage,
+    codingApprovalCallbackData,
+    type CodingApprovalAction,
+    type CodingApprovalRequest,
+    type CodingApprovalResult,
+    type CodingApprovalReview,
+    type CodingApprovalState,
+    type CodingApprovalStatus,
+    type CodingChangeSet,
     type CodingDurableSession,
     type CodingInstructionInput,
     type CodingJobState,
@@ -21,10 +30,22 @@ const USER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ACTIVE_STATUSES: readonly CodingJobStatus[] = ['queued', 'running', 'awaiting_input', 'cancelling'];
 const TERMINAL_STATUSES: readonly CodingJobStatus[] = ['cancelled', 'completed', 'failed'];
+const APPROVAL_STATUSES: readonly CodingApprovalStatus[] = [
+    'pending',
+    'approved',
+    'rejected',
+    'expired',
+    'applying',
+    'completed',
+    'failed',
+    'stale',
+];
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_STALE_MS = 5 * 60 * 1000;
 const DEFAULT_CANCEL_WAIT_MS = 8_000;
+const DEFAULT_APPROVAL_TTL_MS = 15 * 60 * 1000;
+const APPROVAL_DIFF_MESSAGE_LIMIT = 3_500;
 const MAX_INSTRUCTION_CHARS = 20_000;
 const MAX_ERROR_CHARS = 2_000;
 
@@ -51,17 +72,20 @@ export interface CodingSessionDurableEnv {
     DATABASE?: unknown;
     GITHUB_ALLOWED_REPOSITORIES?: string;
     GITHUB_ALLOWED_REPOSITORIES_BY_USER?: string;
+    GITHUB_WRITE_ALLOWED_REPOSITORIES?: string;
     GITHUB_INSTALLATION_ID?: string;
     GITHUB_INSTALLATION_IDS?: string;
     GITHUB_APP_ID?: string;
     GITHUB_APP_PRIVATE_KEY?: string;
     GITHUB_API_BASE_URL?: string;
+    CODING_APPROVAL_TTL_MS?: string;
     [key: string]: unknown;
 }
 
 export interface CodingSessionDurableObjectOptions {
     executor?: CodingAgentExecutor;
     history?: CodingHistoryStore;
+    changes?: CodingChangeStore;
     notifier?: CodingJobNotifier;
     now?: () => number;
     idFactory?: () => string;
@@ -69,6 +93,7 @@ export interface CodingSessionDurableObjectOptions {
     heartbeatMs?: number;
     staleMs?: number;
     cancelWaitMs?: number;
+    approvalTtlMs?: number;
     configLoader?: () => Promise<void>;
 }
 
@@ -76,6 +101,11 @@ interface ActiveJob {
     jobId: string;
     controller: AbortController;
     promise: Promise<void>;
+}
+
+interface CodingJobOutcome {
+    text: string;
+    changeSet?: CodingChangeSet | null;
 }
 
 function clone<T>(value: T): T {
@@ -105,6 +135,30 @@ function isValidJob(value: unknown): value is CodingJobState {
     );
 }
 
+function isValidApproval(value: unknown): value is CodingApprovalState {
+    if (!value || typeof value !== 'object') {
+        return false;
+    }
+    const approval = value as Partial<CodingApprovalState>;
+    return (
+        typeof approval.id === 'string' &&
+        SESSION_ID_PATTERN.test(approval.id) &&
+        typeof approval.nonce === 'string' &&
+        SESSION_ID_PATTERN.test(approval.nonce) &&
+        typeof approval.status === 'string' &&
+        APPROVAL_STATUSES.includes(approval.status as CodingApprovalStatus) &&
+        typeof approval.sessionId === 'string' &&
+        typeof approval.jobId === 'string' &&
+        typeof approval.userId === 'string' &&
+        typeof approval.chatId === 'string' &&
+        typeof approval.diffHash === 'string' &&
+        /^[0-9a-f]{64}$/i.test(approval.diffHash) &&
+        typeof approval.changeKey === 'string' &&
+        typeof approval.createdAt === 'number' &&
+        typeof approval.expiresAt === 'number'
+    );
+}
+
 function isValidState(value: unknown): value is CodingDurableSession {
     if (!value || typeof value !== 'object') {
         return false;
@@ -125,7 +179,10 @@ function isValidState(value: unknown): value is CodingDurableSession {
         typeof state.cancellationRequested === 'boolean' &&
         typeof state.expiresAt === 'number' &&
         Number.isFinite(state.expiresAt) &&
-        (state.job === null || isValidJob(state.job))
+        (state.job === null || isValidJob(state.job)) &&
+        (state.baseRef === undefined || typeof state.baseRef === 'string') &&
+        (state.baseCommitSha === undefined || typeof state.baseCommitSha === 'string') &&
+        (state.approval === undefined || state.approval === null || isValidApproval(state.approval))
     );
 }
 
@@ -146,6 +203,7 @@ export function createCodingAgentExecutorFromEnv(env: CodingSessionDurableEnv): 
 export class CodingSessionDurableObject {
     private readonly executor: CodingAgentExecutor;
     private readonly history: CodingHistoryStore;
+    private readonly changes: CodingChangeStore;
     private readonly notifier: CodingJobNotifier;
     private readonly now: () => number;
     private readonly idFactory: () => string;
@@ -153,6 +211,7 @@ export class CodingSessionDurableObject {
     private readonly heartbeatMs: number;
     private readonly staleMs: number;
     private readonly cancelWaitMs: number;
+    private readonly approvalTtlMs: number;
     private readonly configLoader: () => Promise<void>;
     private activeJob: ActiveJob | null = null;
     private operationQueue: Promise<void> = Promise.resolve();
@@ -172,12 +231,21 @@ export class CodingSessionDurableObject {
         this.heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
         this.staleMs = options.staleMs ?? DEFAULT_STALE_MS;
         this.cancelWaitMs = options.cancelWaitMs ?? DEFAULT_CANCEL_WAIT_MS;
+        this.approvalTtlMs = options.approvalTtlMs ?? this.approvalTtlFromEnv(env);
+        this.changes =
+            options.changes ??
+            new CodingChangeStore(env.DATABASE as never, Math.max(60, Math.ceil(this.approvalTtlMs / 1000) + 60));
         this.configLoader =
             options.configLoader ??
             (async () => {
                 ENV.merge(env as Record<string, unknown>);
                 await ENV.loadConfig();
             });
+    }
+
+    private approvalTtlFromEnv(env: CodingSessionDurableEnv): number {
+        const parsed = Number(env.CODING_APPROVAL_TTL_MS);
+        return Number.isFinite(parsed) && parsed >= 60_000 ? Math.trunc(parsed) : DEFAULT_APPROVAL_TTL_MS;
     }
 
     private async getStateInternal(userId: string, chatId: string): Promise<CodingDurableSession | null> {
@@ -238,7 +306,7 @@ export class CodingSessionDurableObject {
         if (!instruction || instruction.length > MAX_INSTRUCTION_CHARS) {
             throw new CodingSessionError('invalid', 'Coding instructions must be non-empty and reasonably sized');
         }
-        const state = await this.loadState();
+        let state = await this.loadState();
         if (!state) {
             throw new CodingSessionError('not-found', 'No active coding session');
         }
@@ -257,6 +325,16 @@ export class CodingSessionDurableObject {
         }
         if (state.cancellationRequested) {
             throw new CodingSessionError('cancelled', 'Coding session was cancelled');
+        }
+        if (state.approval?.status === 'applying') {
+            throw new CodingSessionError('busy', 'An approved change is being written to GitHub');
+        }
+        if (state.approval?.status === 'pending' || state.approval?.status === 'approved') {
+            state = {
+                ...state,
+                updatedAt: this.now(),
+                approval: { ...state.approval, status: 'stale', staleAt: this.now() },
+            };
         }
 
         const now = this.now();
@@ -333,6 +411,16 @@ export class CodingSessionDurableObject {
             status: 'cancelled',
             cancellationRequested: true,
             updatedAt: now,
+            ...(state.approval?.status === 'pending' || state.approval?.status === 'approved'
+                ? {
+                      approval: {
+                          ...state.approval,
+                          status: 'stale' as const,
+                          staleAt: now,
+                          error: 'Session was stopped before approval',
+                      },
+                  }
+                : {}),
             job: job ? { ...job, status: job.status === 'completed' ? 'completed' : 'cancelled' } : null,
         };
         await this.saveState(next);
@@ -356,6 +444,18 @@ export class CodingSessionDurableObject {
         ]);
         const current = await this.loadState();
         return current ? clone(current) : null;
+    }
+
+    reviewApproval(input: CodingApprovalRequest): Promise<CodingApprovalReview> {
+        return this.serialize(() => this.reviewApprovalInternal(input));
+    }
+
+    approveChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        return this.serialize(() => this.approveChangesInternal(input));
+    }
+
+    rejectChanges(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        return this.serialize(() => this.rejectChangesInternal(input));
     }
 
     getState(userId: string, chatId: string): Promise<CodingDurableSession | null> {
@@ -512,7 +612,7 @@ export class CodingSessionDurableObject {
         }
         try {
             await this.prepareRuntime();
-            const text =
+            const outcome =
                 job.kind === 'checkout'
                     ? await this.executeCheckout(state, job, controller.signal)
                     : await this.executeInstruction(state, job, controller.signal);
@@ -520,7 +620,7 @@ export class CodingSessionDurableObject {
                 await this.finalizeCancelled(state, 'Coding job cancelled');
                 return;
             }
-            await this.finalizeCompleted(state, job, text);
+            await this.finalizeCompleted(state, job, outcome);
         } catch (error) {
             if (controller.signal.aborted || (await this.isCancellationRequested(state.sessionId, jobId))) {
                 await this.finalizeCancelled(state, 'Coding job cancelled');
@@ -534,18 +634,23 @@ export class CodingSessionDurableObject {
         state: CodingDurableSession,
         job: CodingJobState,
         signal: AbortSignal,
-    ): Promise<string> {
-        await this.executor.prepare(this.workspace(state), signal, progress =>
+    ): Promise<CodingJobOutcome> {
+        const result = await this.executor.prepare(this.workspace(state), signal, progress =>
             this.reportProgress(state, progress, job.id),
         );
-        return 'Repository loaded. What would you like me to do?';
+        await this.updateIfCurrent(state.sessionId, job.id, current => ({
+            ...current,
+            baseRef: result.ref,
+            ...(result.commitSha ? { baseCommitSha: result.commitSha } : {}),
+        }));
+        return { text: 'Repository loaded. What would you like me to do?' };
     }
 
     private async executeInstruction(
         state: CodingDurableSession,
         job: CodingJobState,
         signal: AbortSignal,
-    ): Promise<string> {
+    ): Promise<CodingJobOutcome> {
         if (!job.instruction) {
             throw new CodingSessionError('invalid', 'Coding job has no instruction');
         }
@@ -553,10 +658,21 @@ export class CodingSessionDurableObject {
         const result = await this.executor.run(this.workspace(state), job.instruction, history, signal, progress =>
             this.reportProgress(state, progress, job.id),
         );
-        return result.text || 'The coding agent returned an empty response.';
+        const changeSet =
+            state.baseRef && state.baseCommitSha
+                ? await this.executor.collectChanges(this.workspace(state), state.baseRef, state.baseCommitSha, signal)
+                : null;
+        return {
+            text: result.text || 'The coding agent returned an empty response.',
+            changeSet,
+        };
     }
 
-    private async finalizeCompleted(state: CodingDurableSession, job: CodingJobState, text: string): Promise<void> {
+    private async finalizeCompleted(
+        state: CodingDurableSession,
+        job: CodingJobState,
+        outcome: CodingJobOutcome,
+    ): Promise<void> {
         const current = await this.loadState();
         if (
             !current ||
@@ -592,11 +708,17 @@ export class CodingSessionDurableObject {
                     updated.chatId,
                     updated.sessionId,
                     { role: 'user', content: job.instruction },
-                    { role: 'assistant', content: text },
+                    { role: 'assistant', content: outcome.text },
                 )
                 .catch(() => undefined);
         }
-        await this.notify(updated.sessionId, job.id, text);
+        await this.notify(updated.sessionId, job.id, outcome.text);
+        if (outcome.changeSet?.files.length) {
+            const approval = await this.attachApproval(updated, job, outcome.changeSet);
+            if (approval) {
+                await this.notifyApproval(updated, approval, outcome.changeSet);
+            }
+        }
         await this.scheduleExpiry(updated);
     }
 
@@ -728,6 +850,388 @@ export class CodingSessionDurableObject {
         return !state || state.sessionId !== sessionId || state.job?.id !== jobId || state.cancellationRequested;
     }
 
+    private async reviewApprovalInternal(input: CodingApprovalRequest): Promise<CodingApprovalReview> {
+        const { state, approval } = await this.requireApproval(input);
+        if (approval.jobId !== state.job?.id && (approval.status === 'pending' || approval.status === 'approved')) {
+            const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
+            return { approval: stale ?? approval };
+        }
+        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+            const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
+                'pending',
+                'approved',
+            ]);
+            return { approval: expired ?? approval };
+        }
+        if (approval.status === 'pending') {
+            const changeSet = await this.validateCurrentDiff(state, approval);
+            if (!changeSet) {
+                const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() }, 'pending');
+                return { approval: stale ?? approval };
+            }
+            return { approval, changeSet };
+        }
+        const changeSet = await this.loadApprovalChangeSet(state, approval);
+        return { approval, ...(changeSet ? { changeSet } : {}) };
+    }
+
+    private async approveChangesInternal(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        const { state, approval } = await this.requireApproval(input);
+        if (['applying', 'completed', 'failed', 'rejected', 'expired', 'stale'].includes(approval.status)) {
+            return this.approvalResult(approval);
+        }
+        if (approval.jobId !== state.job?.id && (approval.status === 'pending' || approval.status === 'approved')) {
+            const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
+            return this.approvalResult(stale ?? approval);
+        }
+        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+            const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
+                'pending',
+                'approved',
+            ]);
+            return this.approvalResult(expired ?? approval);
+        }
+        const changeSet = await this.validateCurrentDiff(state, approval);
+        if (!changeSet) {
+            const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
+            return this.approvalResult(stale ?? approval);
+        }
+        if (approval.status === 'pending') {
+            const approved = await this.markApproval(
+                state,
+                approval.id,
+                'approved',
+                { approvedAt: this.now() },
+                'pending',
+            );
+            if (!approved) {
+                return this.approvalResult((await this.loadState())?.approval ?? approval);
+            }
+        }
+        const applying = await this.markApproval(
+            state,
+            approval.id,
+            'applying',
+            { applyingAt: this.now() },
+            'approved',
+        );
+        if (!applying) {
+            return this.approvalResult((await this.loadState())?.approval ?? approval);
+        }
+        if (!state.baseRef || !state.baseCommitSha) {
+            const failed = await this.markApproval(
+                state,
+                approval.id,
+                'failed',
+                {
+                    failedAt: this.now(),
+                    error: 'The repository base commit is not available; reload the repository.',
+                },
+                'applying',
+            );
+            return this.approvalResult(failed ?? applying);
+        }
+        const branch = this.approvalBranch(state, applying);
+        try {
+            const written = await this.executor.writeApprovedChanges(this.workspace(state), {
+                baseRef: state.baseRef,
+                expectedBaseSha: state.baseCommitSha,
+                branchName: branch,
+                message: `Telegram coding agent: approved change ${approval.id}`,
+                changes: changeSet.files.map(file => ({
+                    path: file.path,
+                    ...(file.previousPath ? { previousPath: file.previousPath } : {}),
+                    status: file.status,
+                    ...(file.contentBase64 ? { contentBase64: file.contentBase64 } : {}),
+                    sha256: file.sha256,
+                })),
+            });
+            const completed = await this.markApproval(
+                state,
+                approval.id,
+                'completed',
+                {
+                    completedAt: this.now(),
+                    branch: written.branch,
+                    commitSha: written.commitSha,
+                },
+                'applying',
+            );
+            return {
+                approval: completed ?? applying,
+                branch: written.branch,
+                commitSha: written.commitSha,
+            };
+        } catch (error) {
+            const failed = await this.markApproval(
+                state,
+                approval.id,
+                'failed',
+                {
+                    failedAt: this.now(),
+                    error: safeError(error),
+                },
+                'applying',
+            );
+            return this.approvalResult(failed ?? applying);
+        }
+    }
+
+    private async rejectChangesInternal(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
+        const { state, approval } = await this.requireApproval(input);
+        if (approval.status === 'rejected') {
+            return this.approvalResult(approval);
+        }
+        if (approval.status === 'applying' || approval.status === 'completed') {
+            return this.approvalResult(approval);
+        }
+        if (approval.jobId !== state.job?.id && (approval.status === 'pending' || approval.status === 'approved')) {
+            const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
+            return this.approvalResult(stale ?? approval);
+        }
+        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+            const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
+                'pending',
+                'approved',
+            ]);
+            return this.approvalResult(expired ?? approval);
+        }
+        if (approval.status === 'pending' || approval.status === 'approved') {
+            const rejected = await this.markApproval(state, approval.id, 'rejected', { rejectedAt: this.now() }, [
+                'pending',
+                'approved',
+            ]);
+            return this.approvalResult(rejected ?? approval);
+        }
+        return this.approvalResult(approval);
+    }
+
+    private async requireApproval(
+        input: CodingApprovalRequest,
+    ): Promise<{ state: CodingDurableSession; approval: CodingApprovalState }> {
+        this.validateIdentity(input.userId, input.chatId);
+        const state = await this.loadState();
+        if (!state) {
+            throw new CodingSessionError('not-found', 'No active coding session');
+        }
+        this.assertOwner(state, input.userId, input.chatId);
+        const approval = state.approval;
+        if (!approval) {
+            throw new CodingSessionError('not-found', 'No approval is pending for this session');
+        }
+        if (
+            approval.id !== input.approvalId ||
+            approval.nonce !== input.nonce ||
+            approval.sessionId !== state.sessionId ||
+            approval.userId !== input.userId ||
+            approval.chatId !== input.chatId
+        ) {
+            throw new CodingSessionError('invalid', 'Invalid or stale approval callback');
+        }
+        return { state, approval };
+    }
+
+    private async validateCurrentDiff(
+        state: CodingDurableSession,
+        approval: CodingApprovalState,
+    ): Promise<CodingChangeSet | null> {
+        if (!state.baseRef || !state.baseCommitSha) {
+            return null;
+        }
+        try {
+            const current = await this.executor.collectChanges(
+                this.workspace(state),
+                state.baseRef,
+                state.baseCommitSha,
+            );
+            return current && current.diffHash === approval.diffHash ? current : null;
+        } catch (error) {
+            if (error instanceof CodingSessionError && error.code === 'stale') {
+                return null;
+            }
+            throw error;
+        }
+    }
+
+    private async loadApprovalChangeSet(
+        state: CodingDurableSession,
+        approval: CodingApprovalState,
+    ): Promise<CodingChangeSet | null> {
+        const changeSet = await this.changes.load(state.userId, state.chatId, approval.changeKey);
+        if (
+            !changeSet ||
+            changeSet.diffHash !== approval.diffHash ||
+            changeSet.repository !== state.repository ||
+            changeSet.files.length === 0
+        ) {
+            return null;
+        }
+        return changeSet;
+    }
+
+    private async markApproval(
+        state: CodingDurableSession,
+        approvalId: string,
+        status: CodingApprovalStatus,
+        extra: Partial<CodingApprovalState> = {},
+        expected?: CodingApprovalStatus | readonly CodingApprovalStatus[],
+    ): Promise<CodingApprovalState | null> {
+        return this.withStorageLock(async () => {
+            const current = await this.loadState();
+            if (!current || current.sessionId !== state.sessionId || current.approval?.id !== approvalId) {
+                return null;
+            }
+            if (expected) {
+                const allowed = typeof expected === 'string' ? [expected] : expected;
+                if (!allowed.includes(current.approval.status)) {
+                    return null;
+                }
+            }
+            const nextApproval: CodingApprovalState = { ...current.approval, status, ...extra };
+            await this.writeState({ ...current, approval: nextApproval, updatedAt: this.now() });
+            return nextApproval;
+        });
+    }
+
+    private async attachApproval(
+        state: CodingDurableSession,
+        job: CodingJobState,
+        changeSet: CodingChangeSet,
+    ): Promise<CodingApprovalState | null> {
+        const now = this.now();
+        const id = this.approvalToken();
+        const nonce = this.approvalToken();
+        const approval: CodingApprovalState = {
+            id,
+            nonce,
+            status: 'pending',
+            sessionId: state.sessionId,
+            jobId: job.id,
+            userId: state.userId,
+            chatId: state.chatId,
+            diffHash: changeSet.diffHash,
+            changeKey: id,
+            createdAt: now,
+            expiresAt: now + this.approvalTtlMs,
+        };
+        try {
+            await this.changes.save(state.userId, state.chatId, approval.changeKey, changeSet);
+        } catch {
+            return null;
+        }
+        const attached = await this.withStorageLock(async () => {
+            const current = await this.loadState();
+            if (
+                !current ||
+                current.sessionId !== state.sessionId ||
+                current.job?.id !== job.id ||
+                current.status !== 'awaiting_input'
+            ) {
+                return null;
+            }
+            await this.writeState({
+                ...current,
+                approval,
+                updatedAt: now,
+                expiresAt: Math.max(current.expiresAt, approval.expiresAt),
+            });
+            return approval;
+        });
+        if (!attached) {
+            await this.changes.delete(state.userId, state.chatId, approval.changeKey).catch(() => undefined);
+        }
+        return attached;
+    }
+
+    private async notifyApproval(
+        state: CodingDurableSession,
+        approval: CodingApprovalState,
+        changeSet: CodingChangeSet,
+    ): Promise<void> {
+        const target: CodingTelegramTarget = { chatId: Number(state.chatId) };
+        const text = this.formatApprovalSummary(approval, changeSet);
+        const keyboard = this.approvalKeyboard(approval);
+        try {
+            let messageId: number | undefined;
+            if (changeSet.diff.length > APPROVAL_DIFF_MESSAGE_LIMIT && this.notifier.sendDocument) {
+                messageId = await this.notifier.sendDocument(
+                    target,
+                    `changes-${approval.id}.diff`,
+                    new TextEncoder().encode(changeSet.diff),
+                    { caption: text, keyboard },
+                );
+            } else {
+                messageId = await this.notifier.notify(target, text, { keyboard });
+            }
+            if (messageId) {
+                await this.setApprovalMessageId(state.sessionId, approval.id, messageId);
+            }
+        } catch {
+            // Telegram is a best-effort side channel; approval state remains authoritative.
+        }
+    }
+
+    private formatApprovalSummary(approval: CodingApprovalState, changeSet: CodingChangeSet): string {
+        return [
+            'Changes are ready for review.',
+            changeSet.summary,
+            `Repository: ${changeSet.repository}`,
+            `Base: ${changeSet.baseRef} @ ${changeSet.baseCommitSha.slice(0, 12)}`,
+            `Approval expires: ${new Date(approval.expiresAt).toISOString()}`,
+            '',
+            'Approving writes a new branch only. It never merges, deploys or updates the default branch.',
+            'Only the original user in this private chat can approve.',
+        ].join('\n');
+    }
+
+    private approvalKeyboard(approval: CodingApprovalState): Telegram.InlineKeyboardMarkup {
+        const button = (text: string, action: CodingApprovalAction): Telegram.InlineKeyboardButton => ({
+            text,
+            callback_data: codingApprovalCallbackData(action, approval.id, approval.nonce),
+        });
+        return {
+            inline_keyboard: [
+                [button('Review changes', 'review')],
+                [button('Approve and save to GitHub', 'approve'), button('Reject changes', 'reject')],
+            ],
+        };
+    }
+
+    private async setApprovalMessageId(sessionId: string, approvalId: string, messageId: number): Promise<void> {
+        await this.withStorageLock(async () => {
+            const current = await this.loadState();
+            if (!current || current.sessionId !== sessionId || current.approval?.id !== approvalId) {
+                return;
+            }
+            await this.writeState({
+                ...current,
+                updatedAt: this.now(),
+                approval: { ...current.approval, telegramMessageId: messageId },
+            });
+        });
+    }
+
+    private approvalToken(): string {
+        const token = this.idFactory()
+            .replace(/[^A-Za-z0-9_-]/g, '')
+            .slice(0, 16);
+        return token || 'approval';
+    }
+
+    private approvalBranch(state: CodingDurableSession, approval: CodingApprovalState): string {
+        const session = state.sessionId.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 8) || 'session';
+        const id = approval.id.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 8) || 'change';
+        return `telegram-agent/${session}-${id}`;
+    }
+
+    private approvalResult(approval: CodingApprovalState): CodingApprovalResult {
+        return {
+            approval,
+            ...(approval.branch ? { branch: approval.branch } : {}),
+            ...(approval.commitSha ? { commitSha: approval.commitSha } : {}),
+        };
+    }
+
     private async updateIfCurrent(
         sessionId: string,
         jobId: string,
@@ -785,6 +1289,9 @@ export class CodingSessionDurableObject {
         await this.ctx.storage.delete(STATE_KEY).catch(() => undefined);
         await this.ctx.storage.deleteAlarm().catch(() => undefined);
         await this.history.clear(state.userId, state.chatId, state.sessionId).catch(() => undefined);
+        if (state.approval) {
+            await this.changes.delete(state.userId, state.chatId, state.approval.changeKey).catch(() => undefined);
+        }
         await this.executor.destroy(this.workspace(state)).catch(() => undefined);
     }
 

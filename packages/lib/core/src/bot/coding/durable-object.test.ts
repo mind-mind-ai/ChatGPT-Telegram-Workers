@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CodingAgentExecutor } from './executor';
-import type { CodingHistoryStore } from './history';
+import { CodingChangeStore, type CodingHistoryStore } from './history';
 import type { CodingJobNotifier } from './notifier';
 import {
     CodingSessionDurableObject,
@@ -8,8 +8,8 @@ import {
     type CodingSessionDurableObjectOptions,
     type CodingSessionDurableStorage,
 } from './durable-object';
-import { deferred } from './test-helpers';
-import type { CodingTelegramTarget } from './types';
+import { MemoryKV, deferred } from './test-helpers';
+import type { CodingChangeSet, CodingDurableSession, CodingTelegramTarget } from './types';
 
 class MemoryDurableStorage implements CodingSessionDurableStorage {
     readonly values = new Map<string, unknown>();
@@ -70,15 +70,37 @@ class FakeHistory {
 }
 
 class FakeNotifier implements CodingJobNotifier {
-    readonly messages: { target: CodingTelegramTarget | undefined; text: string }[] = [];
+    readonly messages: {
+        target: CodingTelegramTarget | undefined;
+        text: string;
+        keyboard?: unknown;
+    }[] = [];
+    readonly documents: { filename: string; content: Uint8Array; caption?: string }[] = [];
     fail = false;
 
-    async notify(target: CodingTelegramTarget | undefined, text: string): Promise<number | undefined> {
+    async notify(
+        target: CodingTelegramTarget | undefined,
+        text: string,
+        options: { keyboard?: unknown } = {},
+    ): Promise<number | undefined> {
         if (this.fail) {
             throw new Error('telegram unavailable');
         }
-        this.messages.push({ target, text });
+        this.messages.push({ target, text, ...(options.keyboard ? { keyboard: options.keyboard } : {}) });
         return target?.messageId ?? 100 + this.messages.length;
+    }
+
+    async sendDocument(
+        target: CodingTelegramTarget | undefined,
+        filename: string,
+        content: Uint8Array,
+        options: { caption?: string } = {},
+    ): Promise<number | undefined> {
+        if (this.fail) {
+            throw new Error('telegram unavailable');
+        }
+        this.documents.push({ filename, content, ...(options.caption ? { caption: options.caption } : {}) });
+        return target?.messageId ?? 100 + this.messages.length + this.documents.length;
     }
 }
 
@@ -93,6 +115,14 @@ function fakeExecutor(
         prepare: vi.fn(async (_session: unknown, signal: AbortSignal, onProgress: (text: string) => void) => {
             onProgress?.('Checking out repository...');
             await prepare?.(signal, onProgress);
+            return {
+                repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+                ref: 'main',
+                commitSha: 'a'.repeat(40),
+                filesWritten: 1,
+                bytesWritten: 5,
+                skippedFiles: 0,
+            };
         }),
         run: vi.fn(
             async (
@@ -106,6 +136,15 @@ function fakeExecutor(
                 return run?.(signal, onProgress) ?? { text: 'done', steps: 1, stopReason: 'complete' as const };
             },
         ),
+        collectChanges: vi.fn(async () => null),
+        writeApprovedChanges: vi.fn(async () => ({
+            repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+            baseRef: 'main',
+            baseSha: 'a'.repeat(40),
+            branch: 'telegram-agent/test',
+            commitSha: 'b'.repeat(40),
+            filesChanged: 1,
+        })),
         destroy: vi.fn(async () => undefined),
     } as unknown as CodingAgentExecutor;
 }
@@ -125,6 +164,7 @@ function harness(
         executor?: CodingAgentExecutor;
         history?: FakeHistory;
         notifier?: FakeNotifier;
+        changes?: CodingChangeStore;
         now?: () => number;
         idFactory?: () => string;
         staleMs?: number;
@@ -137,6 +177,7 @@ function harness(
     const executor = options.executor ?? fakeExecutor();
     const history = options.history ?? new FakeHistory();
     const notifier = options.notifier ?? new FakeNotifier();
+    const changes = options.changes ?? new CodingChangeStore(new MemoryKV(), 3_600);
     let id = 0;
     const object = new CodingSessionDurableObject(
         ctx,
@@ -145,10 +186,12 @@ function harness(
             executor,
             history: history as unknown as CodingHistoryStore,
             notifier,
+            changes,
             now: options.now ?? (() => 1_000),
             idFactory: options.idFactory ?? (() => `id-${++id}`),
             staleMs: options.staleMs,
             heartbeatMs: options.heartbeatMs,
+            approvalTtlMs: 900_000,
             cancelWaitMs: options.cancelWaitMs,
             configLoader: async () => undefined,
         } as CodingSessionDurableObjectOptions,
@@ -364,5 +407,302 @@ describe('CodingSessionDurableObject', () => {
             code: 'unauthorized',
         });
         await expect(h.object.stopSession('11', '10')).rejects.toMatchObject({ code: 'unauthorized' });
+    });
+});
+
+function proposedChangeSet(overrides: Partial<CodingChangeSet> = {}): CodingChangeSet {
+    return {
+        repository: 'octo/repo',
+        baseRef: 'main',
+        baseCommitSha: 'a'.repeat(40),
+        diffHash: '1'.repeat(64),
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        files: [
+            {
+                path: 'src/a.ts',
+                status: 'modified',
+                sha256: '2'.repeat(64),
+                size: 3,
+                additions: 1,
+                deletions: 1,
+                contentBase64: 'bmV3',
+            },
+        ],
+        summary: '1 file changed: 1 modified\n+1 -1\nDiff SHA-256: ' + '1'.repeat(64),
+        createdAt: 1_000,
+        ...overrides,
+    };
+}
+
+function approvalExecutor(
+    options: {
+        changes?: () => Promise<CodingChangeSet | null>;
+        write?: () => Promise<{
+            repository: { owner: string; name: string; fullName: string };
+            baseRef: string;
+            baseSha: string;
+            branch: string;
+            commitSha: string;
+            filesChanged: number;
+        }>;
+    } = {},
+) {
+    return {
+        prepare: vi.fn(async () => ({
+            repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+            ref: 'main',
+            commitSha: 'a'.repeat(40),
+            filesWritten: 1,
+            bytesWritten: 1,
+            skippedFiles: 0,
+        })),
+        run: vi.fn(async () => ({ text: 'Implemented the change.', steps: 1, stopReason: 'complete' as const })),
+        collectChanges: vi.fn(options.changes ?? (async () => proposedChangeSet())),
+        writeApprovedChanges: vi.fn(
+            options.write ??
+                (async () => ({
+                    repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+                    baseRef: 'main',
+                    baseSha: 'a'.repeat(40),
+                    branch: 'telegram-agent/session-1',
+                    commitSha: 'b'.repeat(40),
+                    filesChanged: 1,
+                })),
+        ),
+        destroy: vi.fn(async () => undefined),
+    } as unknown as CodingAgentExecutor;
+}
+
+async function readyForApproval(h: Harness): Promise<CodingDurableSession> {
+    await h.object.createSession({ userId: '10', chatId: '10', repository: 'octo/repo' });
+    await h.object.alarm();
+    await h.ctx.drain();
+    await h.object.enqueueInstruction({ userId: '10', chatId: '10', instruction: 'implement it' });
+    await h.object.alarm();
+    await h.ctx.drain();
+    const state = await h.object.getState('10', '10');
+    if (!state?.approval) {
+        throw new Error('approval was not created');
+    }
+    return state;
+}
+
+describe('CodingSessionDurableObject approvals', () => {
+    it('collects a complete change set and sends review, approve and reject buttons', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        expect(state.status).toBe('awaiting_input');
+        expect(state.baseRef).toBe('main');
+        expect(state.baseCommitSha).toBe('a'.repeat(40));
+        expect(state.approval).toMatchObject({ status: 'pending', diffHash: '1'.repeat(64) });
+        expect(h.notifier.messages.some(message => message.text.includes('Changes are ready for review'))).toBe(true);
+        const approvalMessage = h.notifier.messages.find(message => message.keyboard);
+        expect(approvalMessage?.keyboard).toMatchObject({
+            inline_keyboard: [
+                [{ callback_data: expect.stringContaining('code:approval:review:') }],
+                [
+                    { callback_data: expect.stringContaining('code:approval:approve:') },
+                    { callback_data: expect.stringContaining('code:approval:reject:') },
+                ],
+            ],
+        });
+        const keyboard = approvalMessage?.keyboard as { inline_keyboard: { callback_data: string }[][] };
+        for (const button of keyboard.inline_keyboard.flat()) {
+            expect(button.callback_data.length).toBeLessThanOrEqual(64);
+        }
+    });
+
+    it('reviews the exact stored diff without writing to GitHub', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        const review = await h.object.reviewApproval({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(review.changeSet?.diff).toContain('+new');
+        expect(review.changeSet?.diffHash).toBe('1'.repeat(64));
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('writes approved changes once and returns the created branch and commit', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        const request = {
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        };
+        const result = await h.object.approveChanges(request);
+        expect(result.approval.status).toBe('completed');
+        expect(result.branch).toBe('telegram-agent/session-1');
+        expect(result.commitSha).toBe('b'.repeat(40));
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledTimes(1);
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledWith(
+            expect.objectContaining({ repository: 'octo/repo' }),
+            expect.objectContaining({
+                baseRef: 'main',
+                expectedBaseSha: 'a'.repeat(40),
+                changes: [
+                    expect.objectContaining({
+                        path: 'src/a.ts',
+                        status: 'modified',
+                        contentBase64: 'bmV3',
+                        sha256: '2'.repeat(64),
+                    }),
+                ],
+            }),
+        );
+        expect((await h.object.getState('10', '10'))?.approval?.status).toBe('completed');
+
+        const replay = await h.object.approveChanges(request);
+        expect(replay.approval.status).toBe('completed');
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects changes without writing to GitHub', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        const result = await h.object.rejectChanges({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(result.approval.status).toBe('rejected');
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('rejects wrong users, wrong nonces and stale session bindings', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        await expect(
+            h.object.approveChanges({
+                userId: '11',
+                chatId: '10',
+                approvalId: state.approval!.id,
+                nonce: state.approval!.nonce,
+            }),
+        ).rejects.toMatchObject({ code: 'unauthorized' });
+        await expect(
+            h.object.approveChanges({
+                userId: '10',
+                chatId: '10',
+                approvalId: state.approval!.id,
+                nonce: 'wrong',
+            }),
+        ).rejects.toMatchObject({ code: 'invalid' });
+        await expect(
+            h.object.approveChanges({
+                userId: '10',
+                chatId: '10',
+                approvalId: 'other',
+                nonce: state.approval!.nonce,
+            }),
+        ).rejects.toMatchObject({ code: 'invalid' });
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('expires approvals after the configured period', async () => {
+        let now = 1_000;
+        const h = harness({ executor: approvalExecutor(), now: () => now });
+        const state = await readyForApproval(h);
+        now += 900_001;
+        const result = await h.object.approveChanges({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(result.approval.status).toBe('expired');
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('invalidates an approval when the sandbox diff changes', async () => {
+        let current = proposedChangeSet();
+        const h = harness({ executor: approvalExecutor({ changes: async () => current }) });
+        const state = await readyForApproval(h);
+        current = proposedChangeSet({ diffHash: '3'.repeat(64), diff: 'changed\n' });
+        const result = await h.object.approveChanges({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(result.approval.status).toBe('stale');
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('preserves the proposed change set when a GitHub write fails', async () => {
+        const h = harness({
+            executor: approvalExecutor({
+                write: async () => {
+                    throw new Error('GitHub API unavailable');
+                },
+            }),
+        });
+        const state = await readyForApproval(h);
+        const request = {
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        };
+        const result = await h.object.approveChanges(request);
+        expect(result.approval.status).toBe('failed');
+        expect(result.approval.error).toContain('GitHub API unavailable');
+        const review = await h.object.reviewApproval(request);
+        expect(review.changeSet?.diff).toContain('+new');
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('invalidates a pending approval when a new instruction starts', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        await h.object.enqueueInstruction({ userId: '10', chatId: '10', instruction: 'change it again' });
+        const next = await h.object.getState('10', '10');
+        expect(next?.approval?.status).toBe('stale');
+        const result = await h.object.approveChanges({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(result.approval.status).toBe('stale');
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
+    it('serializes concurrent approvals across simulated Worker isolates', async () => {
+        const changes = new CodingChangeStore(new MemoryKV(), 3_600);
+        const executor = approvalExecutor();
+        const h1 = harness({ executor, changes });
+        const state = await readyForApproval(h1);
+        const h2 = harness({ storage: h1.storage, executor, changes });
+        const request = {
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        };
+        const [first, second] = await Promise.all([
+            h1.object.approveChanges(request),
+            h2.object.approveChanges(request),
+        ]);
+        expect([first.approval.status, second.approval.status]).toContain('completed');
+        expect([first.approval.status, second.approval.status].filter(status => status === 'completed')).toHaveLength(
+            1,
+        );
+        expect(executor.writeApprovedChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends a complete diff as a document when it is too large for a message', async () => {
+        const large = proposedChangeSet({ diff: `diff --git a/src/a.ts b/src/a.ts\n${'+line\n'.repeat(1_000)}` });
+        const h = harness({ executor: approvalExecutor({ changes: async () => large }) });
+        await readyForApproval(h);
+        expect(h.notifier.documents).toHaveLength(1);
+        expect(new TextDecoder().decode(h.notifier.documents[0].content)).toContain('+line');
+        expect(h.notifier.documents[0].caption).toContain('Changes are ready for review');
     });
 });

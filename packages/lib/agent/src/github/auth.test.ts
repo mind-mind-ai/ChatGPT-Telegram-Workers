@@ -79,6 +79,32 @@ describe('GitHubAppTokenProvider', () => {
         expect(calls).toHaveLength(1);
     });
 
+    it('requests Contents: write only when explicitly configured', async () => {
+        const { privateKey } = keyPair();
+        const calls: { init?: RequestInit }[] = [];
+        const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+            calls.push({ init });
+            return new Response(JSON.stringify({ token: 'ghs_write_secret', expires_at: '2030-01-01T00:00:00Z' }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            });
+        }) as typeof fetch;
+        const provider = new GitHubAppTokenProvider({
+            appId: '12345',
+            privateKey,
+            contentsPermission: 'write',
+            fetchImpl,
+            apiBaseUrl: 'https://api.github.test',
+            now: () => Date.parse('2029-12-31T00:00:00Z'),
+        });
+
+        await provider.getInstallationToken('999', REPOSITORY);
+        expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+            repositories: ['private'],
+            permissions: { contents: 'write' },
+        });
+    });
+
     it('maps authentication failures without exposing the token or response body', async () => {
         const { privateKey } = keyPair();
         const fetchImpl = (async () =>

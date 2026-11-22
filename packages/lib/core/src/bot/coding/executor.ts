@@ -4,11 +4,15 @@ import {
     registerCodingTools,
     registerGitHubTools,
     ToolRegistry,
+    type GitHubCheckoutResult,
     type GitHubService,
+    type GitHubWriteChangesInput,
+    type GitHubWriteChangesResult,
 } from '@chatgpt-telegram-workers/agent';
 import { SandboxError, type SandboxClient, type SandboxScope } from '@chatgpt-telegram-workers/sandbox';
+import { collectCodingChanges } from './changes';
 import { CODING_SYSTEM_PROMPT } from './prompt';
-import { CodingSessionError, codingErrorMessage, type CodingRunResult } from './types';
+import { CodingSessionError, codingErrorMessage, type CodingChangeSet, type CodingRunResult } from './types';
 
 export interface CodingWorkspaceSession {
     userId: string;
@@ -46,7 +50,7 @@ export class CodingAgentExecutor {
         session: CodingWorkspaceSession,
         signal?: AbortSignal,
         onProgress?: CodingProgressHandler,
-    ): Promise<void> {
+    ): Promise<GitHubCheckoutResult> {
         let sandbox: SandboxClient;
         try {
             sandbox = await this.ensureSandbox(session);
@@ -65,17 +69,51 @@ export class CodingAgentExecutor {
             }
 
             await onProgress?.('Checking out the repository into the sandbox...');
-            const result = await this.createRegistry(sandbox, github).execute(
-                { id: 'bootstrap-checkout', name: 'repo_checkout', arguments: '{}' },
-                access,
-                { signal, timeoutMs: this.options.toolTimeoutMs ?? 60_000 },
-            );
-            if (result.isError) {
-                throw new CodingSessionError('checkout', result.content);
+            const result = await github.checkoutRepository(session.repository, access, sandbox, { signal });
+            let commitSha = result.commitSha;
+            if (!commitSha && github.getBranchHead) {
+                const head = await github.getBranchHead(session.repository, access, result.ref, { signal });
+                commitSha = head.sha;
             }
+            return { ...result, ...(commitSha ? { commitSha } : {}) };
         } catch (error) {
             throw this.asCodingError(error, 'checkout', 'Repository checkout failed');
         }
+    }
+
+    async collectChanges(
+        session: CodingWorkspaceSession,
+        baseRef: string,
+        baseCommitSha: string,
+        signal?: AbortSignal,
+    ): Promise<CodingChangeSet | null> {
+        let sandbox: SandboxClient;
+        try {
+            sandbox = await this.ensureSandbox(session);
+            return await collectCodingChanges({
+                session,
+                baseRef,
+                baseCommitSha,
+                github: this.options.githubFactory(),
+                sandbox,
+                signal,
+            });
+        } catch (error) {
+            if (error instanceof CodingSessionError) {
+                throw error;
+            }
+            throw this.asCodingError(error, 'sandbox', 'Change review failed');
+        }
+    }
+
+    async writeApprovedChanges(
+        session: CodingWorkspaceSession,
+        input: GitHubWriteChangesInput,
+        signal?: AbortSignal,
+    ): Promise<GitHubWriteChangesResult> {
+        return this.options.githubFactory().writeChanges(session.repository, this.access(session), input, {
+            signal,
+        });
     }
 
     async run(

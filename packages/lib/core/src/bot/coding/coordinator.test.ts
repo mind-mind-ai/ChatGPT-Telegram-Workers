@@ -20,6 +20,9 @@ describe('DurableCodingSessionCoordinator', () => {
             createSession: vi.fn(async () => session),
             enqueueInstruction: vi.fn(async () => session),
             stopSession: vi.fn(async () => session),
+            reviewApproval: vi.fn(async () => ({ approval: session.approval! })),
+            approveChanges: vi.fn(async () => ({ approval: session.approval! })),
+            rejectChanges: vi.fn(async () => ({ approval: session.approval! })),
         };
         const namespace: CodingSessionNamespaceBinding = { getByName: vi.fn(() => stub) };
         const coordinator = createDurableCodingSessionCoordinator(namespace, '10', '10');
