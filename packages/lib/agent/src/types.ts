@@ -1,4 +1,6 @@
 import type { Message, Part } from '@chatgpt-telegram-workers/ai';
+import type { AgentRunResult, CompleteWithToolsOptions } from './runtime';
+import type { ToolRegistry } from './tools';
 
 export type { Message, Part };
 
@@ -23,6 +25,15 @@ export interface AgentBase {
 export interface ChatAgent extends AgentBase {
     /** 发送一轮对话,返回助手最终文本;onStream 非空时以增量文本回调 */
     chat: (messages: Message[], onStream: StreamHandler | null) => Promise<string>;
+    /**
+     * Runs the agent loop with the given tools. Does not stream.
+     * Returns the final text plus the conversation, tool calls and tool results.
+     */
+    completeWithTools: (
+        messages: Message[],
+        tools: ToolRegistry,
+        options?: CompleteWithToolsOptions,
+    ) => Promise<AgentRunResult>;
 }
 
 export interface ImageAgent extends AgentBase {

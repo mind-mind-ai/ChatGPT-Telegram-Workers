@@ -45,6 +45,9 @@ export function createWorkersChat(provider: ChatProviderConfig, settings: AppSet
                 clear();
             }
         },
+        completeWithTools: async () => {
+            throw new Error('Tool calling is not supported by the workers protocol');
+        },
     };
 }
 

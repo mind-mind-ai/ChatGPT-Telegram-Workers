@@ -1,7 +1,14 @@
-import type { ClientConfig, CompletionOptions } from '@chatgpt-telegram-workers/ai';
+import type {
+    ClientConfig,
+    CompletionOptions,
+    Message,
+    ToolChoice,
+    ToolDefinition,
+} from '@chatgpt-telegram-workers/ai';
 import type { AppSettings, ChatProviderConfig, ImageProviderConfig } from '@chatgpt-telegram-workers/config';
 import type { ChatAgent, ImageAgent } from './types';
 import { createClient, createImageClient, findChatProtocol } from '@chatgpt-telegram-workers/ai';
+import { AgentRuntime } from './runtime';
 import { consumeTextStream } from './stream';
 
 /** 走 HTTP 客户端的聊天协议(workers 有独立入口) */
@@ -11,13 +18,54 @@ export type HttpChatProtocol = 'chat-completions' | 'anthropic-messages' | 'resp
  * 按 `chatCompleteApiTimeout`(秒,<=0 表示不限)创建超时控制器。
  * 返回 clear,调用方在请求结束后必须清理,避免定时器泄漏。
  */
-export function chatAbortSignal(settings: AppSettings): { signal?: AbortSignal; clear: () => void } {
-    if (settings.chatCompleteApiTimeout <= 0) {
+export function chatAbortSignal(
+    settings: AppSettings,
+    parent?: AbortSignal,
+): { signal?: AbortSignal; clear: () => void } {
+    const timeoutMs = settings.chatCompleteApiTimeout;
+    if (timeoutMs <= 0 && !parent) {
         return { clear: () => {} };
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), settings.chatCompleteApiTimeout * 1000);
-    return { signal: controller.signal, clear: () => clearTimeout(timer) };
+    const abortFromParent = () => controller.abort(parent?.reason);
+    if (parent) {
+        if (parent.aborted) {
+            controller.abort(parent.reason);
+        } else {
+            parent.addEventListener('abort', abortFromParent, { once: true });
+        }
+    }
+    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs * 1000) : undefined;
+    return {
+        signal: controller.signal,
+        clear: () => {
+            if (timer) {
+                clearTimeout(timer);
+            }
+            parent?.removeEventListener('abort', abortFromParent);
+        },
+    };
+}
+
+function buildChatOptions(
+    provider: ChatProviderConfig,
+    settings: AppSettings,
+    messages: Message[],
+    signal: AbortSignal | undefined,
+    tools?: ToolDefinition[],
+    toolChoice?: ToolChoice,
+): CompletionOptions {
+    const extra = provider.extraParams ?? {};
+    return {
+        model: provider.model,
+        system: settings.systemInitMessage || undefined,
+        messages,
+        signal,
+        ...(settings.maxOutputTokens > 0 ? { maxTokens: settings.maxOutputTokens } : {}),
+        ...(Object.keys(extra).length ? { extra } : {}),
+        ...(tools?.length ? { tools } : {}),
+        ...(tools?.length && toolChoice ? { toolChoice } : {}),
+    };
 }
 
 /** 从 provider.options 读取 API Key 的自定义请求头名(Azure 用 `api-key`) */
@@ -43,22 +91,30 @@ export function createChatAgent(
     settings: AppSettings,
 ): ChatAgent {
     const client = createClient(protocol, clientConfig(provider, settings));
+    const runtime = new AgentRuntime(async request => {
+        const { signal, clear } = chatAbortSignal(settings, request.signal);
+        const options = buildChatOptions(
+            provider,
+            settings,
+            request.messages,
+            signal,
+            request.tools,
+            request.toolChoice,
+        );
+        try {
+            return await client.complete(options);
+        } finally {
+            clear();
+        }
+    });
     return {
         name: provider.id,
         label: provider.label || findChatProtocol(protocol)?.label || protocol,
         model: provider.model || provider.models[0] || '',
         modelList: async () => provider.models,
         chat: async (messages, onStream) => {
-            const extra = provider.extraParams ?? {};
             const { signal, clear } = chatAbortSignal(settings);
-            const options: CompletionOptions = {
-                model: provider.model,
-                system: settings.systemInitMessage || undefined,
-                messages,
-                signal,
-                ...(settings.maxOutputTokens > 0 ? { maxTokens: settings.maxOutputTokens } : {}),
-                ...(Object.keys(extra).length ? { extra } : {}),
-            };
+            const options = buildChatOptions(provider, settings, messages, signal);
             try {
                 if (onStream) {
                     return await consumeTextStream(
@@ -72,6 +128,7 @@ export function createChatAgent(
                 clear();
             }
         },
+        completeWithTools: (messages, tools, options) => runtime.run(messages, tools, options),
     };
 }
 

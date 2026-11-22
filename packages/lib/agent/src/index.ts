@@ -1,7 +1,10 @@
 export * from './agent';
 export * from './chat';
+export * from './errors';
 export * from './providers';
+export * from './runtime';
 export * from './stream';
+export * from './tools';
 export * from './types';
 export * from './workersai';
 
