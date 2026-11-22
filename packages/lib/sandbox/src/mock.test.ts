@@ -7,6 +7,7 @@ import {
     SandboxTimeoutError,
 } from './errors';
 import { MockSandboxClient } from './mock';
+import type { SandboxClient } from './types';
 import { createSandboxWorkspace } from './workspace';
 
 async function createClient(): Promise<MockSandboxClient> {
@@ -87,6 +88,20 @@ describe('MockSandboxClient', () => {
         await expect(client.readFile('missing.txt')).rejects.toBeInstanceOf(SandboxFileError);
         await expect(client.writeFile('', 'x')).rejects.toBeInstanceOf(SandboxFileError);
         await expect(client.remove('', { recursive: true })).rejects.toBeInstanceOf(SandboxFileError);
+    });
+
+    it('keeps separate users and repositories isolated through the SandboxClient interface', async () => {
+        const alice: SandboxClient = new MockSandboxClient({
+            workspace: await createSandboxWorkspace({ userId: 'alice', repository: 'owner/repo' }),
+        });
+        const bob: SandboxClient = new MockSandboxClient({
+            workspace: await createSandboxWorkspace({ userId: 'bob', repository: 'owner/repo' }),
+        });
+        await alice.writeFile('secret.txt', 'alice-only');
+
+        expect(alice.workspace.name).not.toBe(bob.workspace.name);
+        await expect(bob.readFile('secret.txt')).rejects.toBeInstanceOf(SandboxFileError);
+        expect(await alice.readFile('secret.txt')).toEqual(new TextEncoder().encode('alice-only'));
     });
 
     it('takes snapshots and destroys the client', async () => {
