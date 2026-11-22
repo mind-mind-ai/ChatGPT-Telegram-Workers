@@ -139,7 +139,10 @@ class FakeFiles implements CloudflareFiles {
     }
 }
 
-async function createClient(files = new FakeFiles()): Promise<{
+async function createClient(
+    options: { enableInternet?: boolean } = {},
+    files = new FakeFiles(),
+): Promise<{
     client: CloudflareSandboxClient;
     container: FakeContainer;
     files: FakeFiles;
@@ -150,6 +153,7 @@ async function createClient(files = new FakeFiles()): Promise<{
         container,
         files,
         instance: 'basic',
+        enableInternet: options.enableInternet,
         inactivityTimeoutMs: 5_000,
         maxFileBytes: 16,
     });
@@ -172,6 +176,12 @@ describe('CloudflareSandboxClient', () => {
         expect(container.inactivityTimeout).toBe(5_000);
         expect(container.execCalls[0]?.cmd).toEqual(['bash', '-lc', 'echo hello']);
         expect(container.execCalls[0]?.options?.cwd).toBe('/workspace/repo/src');
+    });
+
+    it('can opt in to container internet access', async () => {
+        const { client, container } = await createClient({ enableInternet: true });
+        await client.exec('npm ci', { timeoutMs: 1_000 });
+        expect(container.startOptions).toMatchObject({ enableInternet: true });
     });
 
     it('truncates command output at the configured limit', async () => {

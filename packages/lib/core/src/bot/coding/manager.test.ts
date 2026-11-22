@@ -78,7 +78,7 @@ describe('CodingSessionManager', () => {
         const names = (requests[0].tools as ToolRegistry)
             .definitions(requests[0].options.access)
             .map(tool => tool.name);
-        expect(names).toEqual(expect.arrayContaining(['shell_exec', 'repo_checkout']));
+        expect(names).toEqual(expect.arrayContaining(['shell_exec', 'repo_info']));
         expect(kv.values.has('coding:history:10:10:session-1')).toBe(true);
         expect(kv.values.has('history:10')).toBe(false);
     });

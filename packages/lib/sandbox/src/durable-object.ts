@@ -53,6 +53,8 @@ export interface SandboxDurableObjectOptions {
     clientFactory?: SandboxClientFactory;
     rootDir?: string;
     instance?: CloudflareSandboxClientOptions['instance'];
+    /** Disabled by default; override with SANDBOX_INTERNET for repositories that need downloads. */
+    enableInternet?: boolean;
     inactivityTimeoutMs?: number;
     shell?: string;
     execTimeoutMs?: number;
@@ -91,6 +93,12 @@ export interface SandboxDurableObjectStub {
 /** The subset of a Durable Object namespace binding used by the sandbox adapter. */
 export interface SandboxNamespaceBinding {
     getByName(name: string): SandboxDurableObjectStub;
+}
+
+function envBoolean(value: unknown): boolean {
+    return (
+        value === true || (typeof value === 'string' && ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase()))
+    );
 }
 
 function defaultClientFactory(
@@ -281,6 +289,7 @@ export class SandboxDurableObject {
             return this.clientFactory(this.ctx, {
                 workspace,
                 instance: this.options.instance ?? 'basic',
+                enableInternet: this.options.enableInternet ?? envBoolean(this._env.SANDBOX_INTERNET),
                 inactivityTimeoutMs: this.options.inactivityTimeoutMs,
                 shell: this.options.shell,
                 execTimeoutMs: this.options.execTimeoutMs,

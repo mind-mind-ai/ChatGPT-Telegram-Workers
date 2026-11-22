@@ -75,7 +75,9 @@ export class CodingAgentExecutor {
                 const head = await github.getBranchHead(session.repository, access, result.ref, { signal });
                 commitSha = head.sha;
             }
-            return { ...result, ...(commitSha ? { commitSha } : {}) };
+            await this.initializeGitWorkspace(sandbox, signal);
+            const ref = result.ref.replace(/^refs\/heads\//, '');
+            return { ...result, ref, ...(commitSha ? { commitSha } : {}) };
         } catch (error) {
             throw this.asCodingError(error, 'checkout', 'Repository checkout failed');
         }
@@ -123,16 +125,22 @@ export class CodingAgentExecutor {
         signal?: AbortSignal,
         onProgress?: CodingProgressHandler,
     ): Promise<CodingRunResult> {
+        const agent = this.options.agentFactory();
+        if (!agent) {
+            throw new CodingSessionError('agent', 'No chat model is configured');
+        }
+        if (agent.supportsTools === false) {
+            throw new CodingSessionError(
+                'agent',
+                'Coding sessions require a chat provider that supports tool calling. Choose an OpenAI-compatible or Anthropic provider.',
+            );
+        }
+
         let sandbox: SandboxClient;
         try {
             sandbox = await this.ensureSandbox(session);
         } catch (error) {
             throw this.asCodingError(error, 'sandbox', 'Sandbox initialization failed');
-        }
-
-        const agent = this.options.agentFactory();
-        if (!agent) {
-            throw new CodingSessionError('agent', 'No chat model is configured');
         }
 
         await onProgress?.('Running the coding agent...');
@@ -158,6 +166,19 @@ export class CodingAgentExecutor {
         this.sandboxes.delete(key);
         if (sandbox) {
             await sandbox.destroy().catch(() => undefined);
+            return;
+        }
+        // The Durable Object may have restarted since the sandbox was created.
+        // Destroy it by name so an abandoned container does not linger.
+        try {
+            const orphan = await this.options.sandboxFactory({
+                userId: session.userId,
+                repository: session.repository,
+                sessionId: session.sessionId,
+            });
+            await orphan.destroy().catch(() => undefined);
+        } catch {
+            // No binding or no sandbox to clean up.
         }
     }
 
@@ -174,8 +195,28 @@ export class CodingAgentExecutor {
     private createRegistry(sandbox: SandboxClient, github = this.options.githubFactory()): ToolRegistry {
         const registry = new ToolRegistry();
         registerCodingTools(registry, { sandbox });
-        registerGitHubTools(registry, { service: github, sandbox });
+        registerGitHubTools(registry, { service: github, sandbox, includeCheckout: false });
         return registry;
+    }
+
+    /**
+     * The archive checkout has no .git directory. Create a local baseline so the
+     * agent can use git diff/status while it works; GitHub writes still happen
+     * only through the Worker approval flow.
+     */
+    private async initializeGitWorkspace(sandbox: SandboxClient, signal: AbortSignal | undefined): Promise<void> {
+        const command = [
+            'git init -q',
+            "git config user.name 'Coding Agent'",
+            "git config user.email 'coding-agent@example.invalid'",
+            'git add -A',
+            'git -c commit.gpgsign=false commit -q -m "Base checkout" --no-verify',
+        ].join(' && ');
+        try {
+            await sandbox.exec(command, { signal, timeoutMs: 60_000, maxOutputBytes: 64 * 1024 });
+        } catch {
+            // Git metadata is a convenience for the agent, not a write path.
+        }
     }
 
     private async ensureSandbox(session: CodingWorkspaceSession): Promise<SandboxClient> {

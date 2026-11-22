@@ -110,6 +110,38 @@ describe('CodeStatusCommandHandler', () => {
         expect(idle.texts[0]).toContain('Job: checkout / completed');
     });
 
+    it('re-attaches approval buttons so a lost notification can be recovered', async () => {
+        const fake = replyFactory();
+        const approval = {
+            id: 'approval1',
+            nonce: 'nonce1',
+            status: 'pending' as const,
+            sessionId: 'session-1',
+            jobId: 'job-1',
+            userId: '10',
+            chatId: '10',
+            diffHash: '1'.repeat(64),
+            changeKey: 'approval1',
+            createdAt: 1_000,
+            expiresAt: Date.now() + 60_000,
+        };
+        const handler = new CodeStatusCommandHandler({
+            coordinator: coordinatorFactory(
+                fakeCoordinator({ getState: vi.fn(async () => durableSession({ approval })) }),
+            ),
+            reply: fake.factory,
+        });
+        await handler.handle(message({ text: '/code_status' }), '', {
+            SHARE_CONTEXT: { botToken: '123:test' },
+        } as never);
+        expect(fake.texts[0]).toContain('Approval: pending');
+        expect(fake.keyboards[0].inline_keyboard.flat().map(button => button.callback_data)).toEqual([
+            'code:approval:review:approval1:nonce1',
+            'code:approval:approve:approval1:nonce1',
+            'code:approval:reject:approval1:nonce1',
+        ]);
+    });
+
     it('reports when there is no session', async () => {
         const fake = replyFactory();
         const handler = new CodeStatusCommandHandler({

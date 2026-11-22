@@ -36,3 +36,6 @@ ADMIN_PASSWORD=
 # GITHUB_WRITE_ALLOWED_REPOSITORIES=owner/repo
 # Approval lifetime in milliseconds (default 15 minutes).
 # CODING_APPROVAL_TTL_MS=900000
+# Optional: allow the coding sandbox to reach the internet (npm/pip installs).
+# Disabled by default; enabling it lets repository code make outbound requests.
+# SANDBOX_INTERNET=false

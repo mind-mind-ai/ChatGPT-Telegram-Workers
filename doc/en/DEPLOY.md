@@ -1,6 +1,6 @@
 # Deploy to Cloudflare Workers
 
-Cloudflare Workers is the default and easiest way to run this bot: free plan works, no server, no domain required (you get a free `*.workers.dev` domain).
+Cloudflare Workers is the default and easiest way to run this bot: no server and no domain required (you get a free `*.workers.dev` domain). The chat bot works on the free plan. The coding-agent sandbox uses Cloudflare Containers, which requires a Workers Paid plan, and building the sandbox image requires Docker.
 
 > For Vercel / local / Docker deployments, see [Deploy to Vercel, Local, Docker](DEPLOY_OTHERS.md).
 >

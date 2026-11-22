@@ -6,6 +6,7 @@ import { createDefaultCodingCoordinator, getDefaultGitHubService } from '../codi
 import { createMessageReply, type CodingReply } from '../coding/telegram';
 import {
     CodingSessionError,
+    codingApprovalCallbackData,
     codingErrorMessage,
     type CodingCoordinatorFactory,
     type CodingDurableSession,
@@ -61,6 +62,23 @@ export function codingStatusLabel(status: CodingJobStatus): string {
         case 'failed':
             return 'failed';
     }
+}
+
+function approvalKeyboard(session: CodingDurableSession): Telegram.InlineKeyboardMarkup | null {
+    const approval = session.approval;
+    if (!approval || !['pending', 'approved', 'applying', 'failed'].includes(approval.status)) {
+        return null;
+    }
+    const button = (text: string, action: 'review' | 'approve' | 'reject') => ({
+        text,
+        callback_data: codingApprovalCallbackData(action, approval.id, approval.nonce),
+    });
+    return {
+        inline_keyboard: [
+            [button('Review changes', 'review')],
+            [button('Approve and save to GitHub', 'approve'), button('Reject changes', 'reject')],
+        ],
+    };
 }
 
 function formatStatus(session: CodingDurableSession): string {
@@ -160,7 +178,10 @@ export class CodeStatusCommandHandler implements CommandHandler {
             if (!session) {
                 return reply.sendText('No active coding session. Use /code to start one.');
             }
-            return reply.sendText(formatStatus(session));
+            const keyboard = approvalKeyboard(session);
+            return keyboard
+                ? reply.sendKeyboard(formatStatus(session), keyboard)
+                : reply.sendText(formatStatus(session));
         } catch (error) {
             return reply.sendText(`Could not read coding status: ${codingErrorMessage(error)}`);
         }

@@ -53,6 +53,7 @@ export interface GitHubDownloadOptions extends GitHubServiceRequestOptions {
 export const DEFAULT_GITHUB_MAX_ARCHIVE_BYTES = 20 * 1024 * 1024;
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/i;
+const MAX_WRITE_BASE64_CHARS = 24 * 1024 * 1024;
 
 function assertSha(value: string): void {
     if (!SHA_PATTERN.test(value)) {
@@ -249,6 +250,7 @@ export class GitHubService {
         );
         const entries: { path: string; mode: string; type: string; sha: string | null }[] = [];
         const seen = new Set<string>();
+        let encodedBytes = 0;
         for (const change of input.changes) {
             const path = normalizeWritePath(change.path);
             if (seen.has(path)) {
@@ -264,6 +266,10 @@ export class GitHubService {
             }
             if (!change.contentBase64) {
                 throw new GitHubError('invalid', `Missing content for ${path}`);
+            }
+            encodedBytes += change.contentBase64.length;
+            if (encodedBytes > MAX_WRITE_BASE64_CHARS) {
+                throw new GitHubError('invalid', 'The approved change set is too large to write safely');
             }
             const content = decodeBase64(change.contentBase64);
             if (change.sha256) {

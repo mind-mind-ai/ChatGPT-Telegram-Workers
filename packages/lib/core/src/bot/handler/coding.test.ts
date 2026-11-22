@@ -304,6 +304,17 @@ describe('CodingCallbackHandler approvals', () => {
         expect(wrongUser.answers[0]).toContain('does not belong');
     });
 
+    it('rejects approval callbacks without requiring GitHub credentials', async () => {
+        const fake = callbackReply();
+        const reject = vi.fn(async () => ({ approval: { ...approval, status: 'rejected' as const } }));
+        await new CodingCallbackHandler({
+            coordinator: coordinatorFactory(fakeCoordinator({ rejectChanges: reject })),
+            reply: fake.factory,
+        }).handle(callbackUpdate('code:approval:reject:approval1:nonce1'), context());
+        expect(reject).toHaveBeenCalled();
+        expect(fake.texts.at(-1)).toContain('rejected');
+    });
+
     it('rejects changes through the same one-time callback', async () => {
         const fake = callbackReply();
         const reject = vi.fn(async () => ({ approval: { ...approval, status: 'rejected' as const } }));

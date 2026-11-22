@@ -114,6 +114,7 @@ export function createChatAgent(
         label: provider.label || findChatProtocol(protocol)?.label || protocol,
         model: provider.model || provider.models[0] || '',
         modelList: async () => provider.models,
+        supportsTools: true,
         chat: async (messages, onStream) => {
             const { signal, clear } = chatAbortSignal(settings);
             const options = buildChatOptions(provider, settings, messages, signal);

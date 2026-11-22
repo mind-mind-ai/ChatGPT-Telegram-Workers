@@ -16,7 +16,7 @@ import {
 
 export interface CodingCallbackDependencies {
     coordinator: CodingCoordinatorFactory;
-    github: GitHubService;
+    github?: GitHubService;
     reply: (token: string, update: Telegram.Update) => CodingReply;
 }
 
@@ -28,7 +28,6 @@ export interface CodingMessageDependencies {
 function defaultCallbackDependencies(): CodingCallbackDependencies {
     return {
         coordinator: createDefaultCodingCoordinator,
-        github: getDefaultGitHubService(),
         reply: createReplyForUpdate,
     };
 }
@@ -83,7 +82,7 @@ function formatApprovalStatus(approval: CodingApprovalResult['approval']): strin
         case 'applying':
             return 'The approved changes are being written to GitHub.';
         case 'failed':
-            return `GitHub write failed: ${approval.error ?? 'unknown error'}\nThe proposed changes are preserved in this session.`;
+            return `GitHub write failed: ${approval.error ?? 'unknown error'}\nThe proposed changes are preserved. Press Approve again to retry safely.`;
         case 'rejected':
             return 'These changes were rejected. Nothing was written to GitHub.';
         case 'expired':
@@ -187,7 +186,8 @@ export class CodingCallbackHandler implements UpdateHandler {
                 await reply.sendText('A coding session is already active. Use /code_status or /code_stop first.');
                 return ok();
             }
-            const repositories = await deps.github.listAuthorizedRepositories({
+            const github = deps.github ?? getDefaultGitHubService();
+            const repositories = await github.listAuthorizedRepositories({
                 userId: identity.userId,
                 chatId: identity.chatId,
             });

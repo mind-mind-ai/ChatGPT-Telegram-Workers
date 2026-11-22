@@ -5,6 +5,10 @@ them inside the existing Cloudflare sandbox. Reads are always allowed for an
 explicitly allowlisted repository. Writing is disabled by default and can only
 happen after the Telegram user reviews a complete diff and presses **Approve**.
 
+Coding sessions need a chat provider that supports tool calling (an
+OpenAI-compatible or Anthropic provider). The Cloudflare Workers AI provider
+does not support the tool loop and will be rejected with a clear error.
+
 An approved write creates a new branch and one commit through the GitHub Git
 Data API. It never updates the default branch, merges, deploys, opens pull
 requests or force-pushes.
@@ -69,15 +73,16 @@ Set these as Worker secrets or environment variables. Never commit them.
 
 | Variable                              | Required                 | Purpose                                                                       |
 | ------------------------------------- | ------------------------ | ----------------------------------------------------------------------------- |
-| `GITHUB_APP_ID`                       | For private repositories | GitHub App numeric ID.                                                        |
-| `GITHUB_APP_PRIVATE_KEY`              | For private repositories | Unencrypted PEM private key. Newlines may be escaped as `\n`.                 |
-| `GITHUB_INSTALLATION_ID`              | For private repositories | Default installation ID for authorized repositories.                          |
+| `GITHUB_APP_ID`                       | For private repos/writes | GitHub App numeric ID. Required for private repositories and all writes.      |
+| `GITHUB_APP_PRIVATE_KEY`              | For private repos/writes | Unencrypted PEM private key. Newlines may be escaped as `\n`.                 |
+| `GITHUB_INSTALLATION_ID`              | For private repos/writes | Default installation ID for authorized repositories.                          |
 | `GITHUB_ALLOWED_REPOSITORIES`         | Yes                      | Comma-separated global allowlist, e.g. `owner/repo,owner/other`.              |
 | `GITHUB_ALLOWED_REPOSITORIES_BY_USER` | Optional                 | JSON map of Telegram user id to a repository array or comma-separated string. |
 | `GITHUB_INSTALLATION_IDS`             | Optional                 | JSON map of `owner/repo` to installation ID; overrides the default.           |
 | `GITHUB_API_BASE_URL`                 | Optional                 | GitHub API base URL. Defaults to `https://api.github.com`.                    |
 | `GITHUB_WRITE_ALLOWED_REPOSITORIES`   | Optional                 | Separate comma-separated allowlist for approval-gated writes. Empty by default. |
 | `CODING_APPROVAL_TTL_MS`              | Optional                 | Approval lifetime in milliseconds. Defaults to 15 minutes; minimum 60 seconds. |
+| `SANDBOX_INTERNET`                    | Optional                 | Set `true` to let the coding sandbox download packages. Default `false`.       |
 
 Example per-user authorization:
 
@@ -114,9 +119,9 @@ changes, Telegram receives a summary with three buttons:
 Only the original Telegram user in the original private chat can use the
 buttons. The callback is rejected for other users, groups, expired approvals,
 changed diffs, changed jobs or changed sessions. A replayed approval returns
-the existing result and never writes a second time. A failed GitHub write
-leaves the proposed change set available for review; it is never retried
-automatically.
+the existing result and never writes a second time. A failed GitHub write leaves the proposed change set available for review.
+Pressing **Approve and save to GitHub** again retries the same branch and
+commit safely; it is never retried automatically.
 
 ## Wiring
 

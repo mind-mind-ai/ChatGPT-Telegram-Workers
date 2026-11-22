@@ -21,6 +21,7 @@ export function createWorkersChat(provider: ChatProviderConfig, settings: AppSet
         label: provider.label || 'Cloudflare Workers AI',
         model: provider.model,
         modelList: async () => provider.models,
+        supportsTools: false,
         chat: async (messages, onStream) => {
             const extra = provider.extraParams ?? {};
             const { signal, clear } = chatAbortSignal(settings);

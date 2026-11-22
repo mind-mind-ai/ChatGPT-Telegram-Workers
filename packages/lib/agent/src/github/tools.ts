@@ -12,6 +12,8 @@ export interface GitHubToolsOptions {
     sandbox: SandboxClient;
     permission?: string;
     requiredPermissions?: readonly string[];
+    /** Set false when the host already checked out the repository. */
+    includeCheckout?: boolean;
 }
 
 function optionalString(args: Record<string, unknown>, key: string): string | undefined {
@@ -112,7 +114,7 @@ export function createGitHubTools(options: GitHubToolsOptions): Tool[] {
         }
     };
 
-    return [
+    const tools: Tool[] = [
         {
             name: 'repo_list',
             description:
@@ -198,6 +200,7 @@ export function createGitHubTools(options: GitHubToolsOptions): Tool[] {
                 }),
         },
     ];
+    return options.includeCheckout === false ? tools.filter(tool => tool.name !== 'repo_checkout') : tools;
 }
 
 export function registerGitHubTools(registry: ToolRegistry, options: GitHubToolsOptions): ToolRegistry {

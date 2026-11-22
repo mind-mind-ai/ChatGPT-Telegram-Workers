@@ -25,6 +25,8 @@ export interface AgentBase {
 export interface ChatAgent extends AgentBase {
     /** 发送一轮对话,返回助手最终文本;onStream 非空时以增量文本回调 */
     chat: (messages: Message[], onStream: StreamHandler | null) => Promise<string>;
+    /** False when the provider cannot execute tool calls (e.g. Workers AI). */
+    supportsTools?: boolean;
     /**
      * Runs the agent loop with the given tools. Does not stream.
      * Returns the final text plus the conversation, tool calls and tool results.

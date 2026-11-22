@@ -249,7 +249,7 @@ export class CodingSessionDurableObject {
     }
 
     private async getStateInternal(userId: string, chatId: string): Promise<CodingDurableSession | null> {
-        const state = await this.loadState();
+        let state = await this.loadState();
         if (!state) {
             return null;
         }
@@ -257,6 +257,22 @@ export class CodingSessionDurableObject {
         if (state.expiresAt <= this.now()) {
             await this.expire(state);
             return null;
+        }
+        const approval = state.approval;
+        if (
+            approval &&
+            ['pending', 'approved', 'applying', 'failed'].includes(approval.status) &&
+            approval.expiresAt <= this.now()
+        ) {
+            const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
+                'pending',
+                'approved',
+                'applying',
+                'failed',
+            ]);
+            if (expired) {
+                state = { ...state, approval: expired };
+            }
         }
         return clone(state);
     }
@@ -530,7 +546,7 @@ export class CodingSessionDurableObject {
                     );
                     return;
                 }
-                await this.scheduleAt(last + this.heartbeatMs);
+                await this.scheduleAt(Math.max(last + this.heartbeatMs, this.now() + this.heartbeatMs));
                 return;
             }
             if (job.status === 'cancelling') {
@@ -856,10 +872,15 @@ export class CodingSessionDurableObject {
             const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
             return { approval: stale ?? approval };
         }
-        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+        if (
+            ['pending', 'approved', 'applying', 'failed'].includes(approval.status) &&
+            approval.expiresAt <= this.now()
+        ) {
             const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
                 'pending',
                 'approved',
+                'applying',
+                'failed',
             ]);
             return { approval: expired ?? approval };
         }
@@ -877,17 +898,22 @@ export class CodingSessionDurableObject {
 
     private async approveChangesInternal(input: CodingApprovalRequest): Promise<CodingApprovalResult> {
         const { state, approval } = await this.requireApproval(input);
-        if (['applying', 'completed', 'failed', 'rejected', 'expired', 'stale'].includes(approval.status)) {
+        if (['completed', 'rejected', 'expired', 'stale'].includes(approval.status)) {
             return this.approvalResult(approval);
         }
         if (approval.jobId !== state.job?.id && (approval.status === 'pending' || approval.status === 'approved')) {
             const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
             return this.approvalResult(stale ?? approval);
         }
-        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+        if (
+            ['pending', 'approved', 'applying', 'failed'].includes(approval.status) &&
+            approval.expiresAt <= this.now()
+        ) {
             const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
                 'pending',
                 'approved',
+                'applying',
+                'failed',
             ]);
             return this.approvalResult(expired ?? approval);
         }
@@ -896,13 +922,13 @@ export class CodingSessionDurableObject {
             const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
             return this.approvalResult(stale ?? approval);
         }
-        if (approval.status === 'pending') {
+        if (approval.status === 'pending' || approval.status === 'failed') {
             const approved = await this.markApproval(
                 state,
                 approval.id,
                 'approved',
                 { approvedAt: this.now() },
-                'pending',
+                approval.status,
             );
             if (!approved) {
                 return this.approvalResult((await this.loadState())?.approval ?? approval);
@@ -913,7 +939,7 @@ export class CodingSessionDurableObject {
             approval.id,
             'applying',
             { applyingAt: this.now() },
-            'approved',
+            approval.status === 'applying' ? 'applying' : 'approved',
         );
         if (!applying) {
             return this.approvalResult((await this.loadState())?.approval ?? approval);
@@ -982,19 +1008,27 @@ export class CodingSessionDurableObject {
         if (approval.status === 'rejected') {
             return this.approvalResult(approval);
         }
-        if (approval.status === 'applying' || approval.status === 'completed') {
+        if (approval.status === 'completed') {
             return this.approvalResult(approval);
         }
         if (approval.jobId !== state.job?.id && (approval.status === 'pending' || approval.status === 'approved')) {
             const stale = await this.markApproval(state, approval.id, 'stale', { staleAt: this.now() });
             return this.approvalResult(stale ?? approval);
         }
-        if ((approval.status === 'pending' || approval.status === 'approved') && approval.expiresAt <= this.now()) {
+        if (
+            ['pending', 'approved', 'applying', 'failed'].includes(approval.status) &&
+            approval.expiresAt <= this.now()
+        ) {
             const expired = await this.markApproval(state, approval.id, 'expired', { expiredAt: this.now() }, [
                 'pending',
                 'approved',
+                'applying',
+                'failed',
             ]);
             return this.approvalResult(expired ?? approval);
+        }
+        if (approval.status === 'applying') {
+            return this.approvalResult(approval);
         }
         if (approval.status === 'pending' || approval.status === 'approved') {
             const rejected = await this.markApproval(state, approval.id, 'rejected', { rejectedAt: this.now() }, [
@@ -1088,6 +1122,9 @@ export class CodingSessionDurableObject {
                 }
             }
             const nextApproval: CodingApprovalState = { ...current.approval, status, ...extra };
+            if (!['failed', 'stale', 'expired'].includes(status)) {
+                delete nextApproval.error;
+            }
             await this.writeState({ ...current, approval: nextApproval, updatedAt: this.now() });
             return nextApproval;
         });
@@ -1154,13 +1191,18 @@ export class CodingSessionDurableObject {
         try {
             let messageId: number | undefined;
             if (changeSet.diff.length > APPROVAL_DIFF_MESSAGE_LIMIT && this.notifier.sendDocument) {
-                messageId = await this.notifier.sendDocument(
-                    target,
-                    `changes-${approval.id}.diff`,
-                    new TextEncoder().encode(changeSet.diff),
-                    { caption: text, keyboard },
-                );
-            } else {
+                try {
+                    messageId = await this.notifier.sendDocument(
+                        target,
+                        `changes-${approval.id}.diff`,
+                        new TextEncoder().encode(changeSet.diff),
+                        { caption: text, keyboard },
+                    );
+                } catch {
+                    messageId = undefined;
+                }
+            }
+            if (!messageId) {
                 messageId = await this.notifier.notify(target, text, { keyboard });
             }
             if (messageId) {

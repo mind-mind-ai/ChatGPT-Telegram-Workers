@@ -345,6 +345,25 @@ describe('CodingSessionDurableObject', () => {
         expect((await h2.object.getState('10', '10'))?.status).toBe('failed');
     });
 
+    it('spaces heartbeat alarms after a restart instead of spinning', async () => {
+        let now = 1_000;
+        const deferredPrepare = deferred<void>();
+        const h1 = harness({
+            executor: fakeExecutor(() => deferredPrepare.promise),
+            now: () => now,
+            heartbeatMs: 30_000,
+        });
+        await h1.object.createSession({ userId: '10', chatId: '10', repository: 'octo/repo' });
+        await h1.object.alarm();
+        await waitFor(async () => (await h1.object.getState('10', '10'))?.status === 'running');
+        now += 31_000;
+        const h2 = harness({ storage: h1.storage, now: () => now, heartbeatMs: 30_000, staleMs: 300_000 });
+        await h2.object.alarm();
+        expect(h2.storage.alarm).toBeGreaterThanOrEqual(now + 30_000);
+        deferredPrepare.resolve();
+        await h1.ctx.drain();
+    });
+
     it('expires stale sessions without leaving writable state', async () => {
         let now = 1_000;
         const h = harness({ now: () => now });
@@ -605,6 +624,67 @@ describe('CodingSessionDurableObject approvals', () => {
         expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
     });
 
+    it('retries a failed GitHub write safely after the user presses approve again', async () => {
+        let attempts = 0;
+        const h = harness({
+            executor: approvalExecutor({
+                write: async () => {
+                    attempts += 1;
+                    if (attempts === 1) {
+                        throw new Error('temporary GitHub outage');
+                    }
+                    return {
+                        repository: { owner: 'octo', name: 'repo', fullName: 'octo/repo' },
+                        baseRef: 'main',
+                        baseSha: 'a'.repeat(40),
+                        branch: 'telegram-agent/session-1',
+                        commitSha: 'b'.repeat(40),
+                        filesChanged: 1,
+                    };
+                },
+            }),
+        });
+        const state = await readyForApproval(h);
+        const request = {
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        };
+        const failed = await h.object.approveChanges(request);
+        expect(failed.approval.status).toBe('failed');
+        const retried = await h.object.approveChanges(request);
+        expect(retried.approval.status).toBe('completed');
+        expect(retried.approval.error).toBeUndefined();
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledTimes(2);
+    });
+
+    it('resumes an approval left applying by a Worker restart', async () => {
+        const h = harness({ executor: approvalExecutor() });
+        const state = await readyForApproval(h);
+        const stored = (await h.storage.get<CodingDurableSession>('coding-session'))!;
+        stored.approval = { ...stored.approval!, status: 'applying', applyingAt: 1_000 };
+        await h.storage.put('coding-session', stored);
+        const result = await h.object.approveChanges({
+            userId: '10',
+            chatId: '10',
+            approvalId: state.approval!.id,
+            nonce: state.approval!.nonce,
+        });
+        expect(result.approval.status).toBe('completed');
+        expect(h.executor.writeApprovedChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks an expired approval when status is read', async () => {
+        let now = 1_000;
+        const h = harness({ executor: approvalExecutor(), now: () => now });
+        await readyForApproval(h);
+        now += 900_001;
+        const state = await h.object.getState('10', '10');
+        expect(state?.approval?.status).toBe('expired');
+        expect(h.executor.writeApprovedChanges).not.toHaveBeenCalled();
+    });
+
     it('expires approvals after the configured period', async () => {
         let now = 1_000;
         const h = harness({ executor: approvalExecutor(), now: () => now });
@@ -704,5 +784,15 @@ describe('CodingSessionDurableObject approvals', () => {
         expect(h.notifier.documents).toHaveLength(1);
         expect(new TextDecoder().decode(h.notifier.documents[0].content)).toContain('+line');
         expect(h.notifier.documents[0].caption).toContain('Changes are ready for review');
+    });
+
+    it('falls back to a text approval message when the document upload fails', async () => {
+        const large = proposedChangeSet({ diff: `diff --git a/src/a.ts b/src/a.ts\n${'+line\n'.repeat(1_000)}` });
+        const notifier = new FakeNotifier();
+        notifier.sendDocument = async () => undefined;
+        const h = harness({ executor: approvalExecutor({ changes: async () => large }), notifier });
+        await readyForApproval(h);
+        expect(h.notifier.messages.some(message => message.text.includes('Changes are ready for review'))).toBe(true);
+        expect(h.notifier.messages.find(message => message.keyboard)).toBeDefined();
     });
 });

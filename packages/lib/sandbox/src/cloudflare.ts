@@ -104,6 +104,8 @@ export interface CloudflareSandboxClientOptions {
     image?: string;
     imageName?: string;
     instance?: CloudflareContainerInstance;
+    /** Disabled by default. Enable only for repositories that need package downloads. */
+    enableInternet?: boolean;
     inactivityTimeoutMs?: number;
     shell?: string;
     execTimeoutMs?: number;
@@ -164,6 +166,7 @@ export class CloudflareSandboxClient implements SandboxClient {
     private readonly image: string | undefined;
     private readonly imageName: string | undefined;
     private readonly instance: CloudflareContainerInstance | undefined;
+    private readonly enableInternet: boolean;
     private readonly inactivityTimeoutMs: number;
     private readonly shell: string;
     private readonly execTimeoutMs: number;
@@ -178,6 +181,7 @@ export class CloudflareSandboxClient implements SandboxClient {
         this.image = options.image;
         this.imageName = options.imageName;
         this.instance = options.instance ?? 'basic';
+        this.enableInternet = options.enableInternet ?? false;
         this.inactivityTimeoutMs = clampInt(
             options.inactivityTimeoutMs,
             1,
@@ -414,7 +418,7 @@ export class CloudflareSandboxClient implements SandboxClient {
         }
         this.container.start({
             image,
-            enableInternet: false,
+            enableInternet: this.enableInternet,
             instance: this.instance,
         });
         await this.container.setInactivityTimeout(this.inactivityTimeoutMs);

@@ -25,6 +25,49 @@ describe('CodingAgentExecutor', () => {
         expect(progress).toHaveBeenCalledWith('Checking out the repository into the sandbox...');
     });
 
+    it('initializes a local git baseline after checkout without exposing repo_checkout', async () => {
+        let captured: Awaited<ReturnType<typeof sandboxFor>> | undefined;
+        let names: string[] = [];
+        const agent = {
+            ...fakeAgent('done'),
+            completeWithTools: async (
+                _messages: unknown[],
+                tools: { definitions: (access: unknown) => { name: string }[] },
+                options: { access?: unknown },
+            ) => {
+                names = tools.definitions(options.access).map(tool => tool.name);
+                return {
+                    text: 'done',
+                    messages: [],
+                    steps: 1,
+                    toolCalls: [],
+                    toolResults: [],
+                    stopReason: 'complete' as const,
+                };
+            },
+        };
+        const ex = executor({
+            sandboxFactory: async scope => {
+                captured = await sandboxFor(scope);
+                return captured;
+            },
+            agentFactory: () => agent as never,
+        });
+        await ex.prepare(SESSION);
+        await ex.run(SESSION, 'work', []);
+        expect(captured?.commands.some(command => command.includes('git init -q'))).toBe(true);
+        expect(names).toContain('repo_info');
+        expect(names).not.toContain('repo_checkout');
+    });
+
+    it('rejects providers without tool calling before running the agent', async () => {
+        const ex = executor({ agentFactory: () => ({ ...fakeAgent('done'), supportsTools: false }) });
+        await expect(ex.run(SESSION, 'work', [])).rejects.toMatchObject({
+            code: 'agent',
+            message: expect.stringContaining('tool calling'),
+        });
+    });
+
     it('rejects a repository outside the user allowlist', async () => {
         const ex = executor({ githubFactory: () => fakeGithub({ repositories: [] }) });
         await expect(ex.prepare(SESSION)).rejects.toMatchObject({ code: 'unauthorized' });
