@@ -1,19 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CodingSessionManager } from '../coding/manager';
-import type { CodingSessionState } from '../coding/types';
-import { context, fakeGithub, fakeReply, message, session } from '../coding/test-helpers';
+import {
+    coordinatorFactory,
+    durableJob,
+    durableSession,
+    fakeCoordinator,
+    fakeGithub,
+    fakeReply,
+    message,
+} from '../coding/test-helpers';
 import { CodeCommandHandler, CodeStatusCommandHandler, CodeStopCommandHandler } from './coding';
-
-function manager(overrides: Partial<CodingSessionManager> = {}): CodingSessionManager {
-    return {
-        getSession: vi.fn(async () => null),
-        startSession: vi.fn(async () => session()),
-        stopSession: vi.fn(async () => session()),
-        statusLabel: vi.fn(() => 'idle (awaiting input)'),
-        runInstruction: vi.fn(),
-        ...overrides,
-    } as unknown as CodingSessionManager;
-}
 
 function replyFactory() {
     const fake = fakeReply();
@@ -25,12 +20,19 @@ describe('CodeCommandHandler', () => {
         const fake = replyFactory();
         const github = fakeGithub({ repositories: ['octo/repo', 'octo/other'] });
         const handler = new CodeCommandHandler({
-            manager: manager(),
+            coordinator: coordinatorFactory(fakeCoordinator()),
             github,
             reply: fake.factory,
         });
 
-        const response = await handler.handle(message({ text: '/code' }), '', context());
+        const response = await handler.handle(message({ text: '/code' }), '', {
+            SHARE_CONTEXT: {
+                botToken: '123:test',
+                botId: 123,
+                chatHistoryKey: 'history:10',
+                lastMessageKey: 'last:10',
+            },
+        } as never);
         expect(response.status).toBe(200);
         expect(fake.texts).toEqual(['Select a repository to work on.']);
         expect(fake.keyboards[0].inline_keyboard.map(row => row[0].text)).toEqual(['octo/repo', 'octo/other']);
@@ -43,11 +45,11 @@ describe('CodeCommandHandler', () => {
     it('does not start a second session or list repositories for an active session', async () => {
         const fake = replyFactory();
         const handler = new CodeCommandHandler({
-            manager: manager({ getSession: vi.fn(async () => session()) }),
+            coordinator: coordinatorFactory(fakeCoordinator({ getState: vi.fn(async () => durableSession()) })),
             github: fakeGithub(),
             reply: fake.factory,
         });
-        await handler.handle(message({ text: '/code' }), '', context());
+        await handler.handle(message({ text: '/code' }), '', { SHARE_CONTEXT: { botToken: '123:test' } } as never);
         expect(fake.texts[0]).toContain('already active');
         expect(fake.keyboards).toHaveLength(0);
     });
@@ -55,83 +57,109 @@ describe('CodeCommandHandler', () => {
     it('rejects groups and users with no authorized repositories', async () => {
         const fake = replyFactory();
         const groupHandler = new CodeCommandHandler({
-            manager: manager(),
+            coordinator: coordinatorFactory(fakeCoordinator()),
             github: fakeGithub(),
             reply: fake.factory,
         });
         await groupHandler.handle(
             message({ chat: { id: 10, type: 'group' }, from: { id: 10, is_bot: false, first_name: 'U' } }),
             '',
-            context(),
+            { SHARE_CONTEXT: { botToken: '123:test' } } as never,
         );
         expect(fake.texts[0]).toContain('private chats');
 
         const empty = replyFactory();
         const handler = new CodeCommandHandler({
-            manager: manager(),
+            coordinator: coordinatorFactory(fakeCoordinator()),
             github: fakeGithub({ repositories: [] }),
             reply: empty.factory,
         });
-        await handler.handle(message({ text: '/code' }), '', context());
+        await handler.handle(message({ text: '/code' }), '', { SHARE_CONTEXT: { botToken: '123:test' } } as never);
         expect(empty.texts[0]).toContain('No GitHub repositories');
     });
 });
 
 describe('CodeStatusCommandHandler', () => {
-    it('reports running and idle statuses', async () => {
+    it('reports meaningful job states and progress', async () => {
         const fake = replyFactory();
-        const running = session({ status: 'running' });
+        const running = durableSession({
+            status: 'running',
+            job: durableJob({ kind: 'instruction', status: 'running', progress: 'Running the coding agent...' }),
+        });
         const handler = new CodeStatusCommandHandler({
-            manager: manager({
-                getSession: vi.fn(async () => running),
-                statusLabel: vi.fn(() => 'running'),
-            }),
+            coordinator: coordinatorFactory(fakeCoordinator({ getState: vi.fn(async () => running) })),
             reply: fake.factory,
         });
-        await handler.handle(message({ text: '/code_status' }), '', context());
+        await handler.handle(message({ text: '/code_status' }), '', {
+            SHARE_CONTEXT: { botToken: '123:test' },
+        } as never);
         expect(fake.texts[0]).toContain('Status: running');
+        expect(fake.texts[0]).toContain('Job: instruction / running');
+        expect(fake.texts[0]).toContain('Progress: Running the coding agent...');
         expect(fake.texts[0]).toContain('Repository: octo/repo');
 
         const idle = replyFactory();
         const idleHandler = new CodeStatusCommandHandler({
-            manager: manager({
-                getSession: vi.fn(async () => session({ status: 'awaiting_input' })),
-                statusLabel: vi.fn(() => 'idle (awaiting input)'),
-            }),
+            coordinator: coordinatorFactory(fakeCoordinator({ getState: vi.fn(async () => durableSession()) })),
             reply: idle.factory,
         });
-        await idleHandler.handle(message({ text: '/code_status' }), '', context());
+        await idleHandler.handle(message({ text: '/code_status' }), '', {
+            SHARE_CONTEXT: { botToken: '123:test' },
+        } as never);
         expect(idle.texts[0]).toContain('idle (awaiting input)');
+        expect(idle.texts[0]).toContain('Job: checkout / completed');
     });
 
     it('reports when there is no session', async () => {
         const fake = replyFactory();
-        const handler = new CodeStatusCommandHandler({ manager: manager(), reply: fake.factory });
-        await handler.handle(message({ text: '/code_status' }), '', context());
+        const handler = new CodeStatusCommandHandler({
+            coordinator: coordinatorFactory(fakeCoordinator()),
+            reply: fake.factory,
+        });
+        await handler.handle(message({ text: '/code_status' }), '', {
+            SHARE_CONTEXT: { botToken: '123:test' },
+        } as never);
         expect(fake.texts[0]).toContain('No active coding session');
     });
 });
 
 describe('CodeStopCommandHandler', () => {
-    it('stops the active session', async () => {
+    it('does not claim cancellation before confirmation', async () => {
         const fake = replyFactory();
-        const stopped = vi.fn(async () => session() as CodingSessionState);
+        const stop = vi.fn(async () => durableSession({ status: 'cancelling', cancellationRequested: true }));
         const handler = new CodeStopCommandHandler({
-            manager: manager({ stopSession: stopped }),
+            coordinator: coordinatorFactory(fakeCoordinator({ stopSession: stop })),
             reply: fake.factory,
         });
-        await handler.handle(message({ text: '/code_stop' }), '', context());
-        expect(stopped).toHaveBeenCalledWith('10', '10');
-        expect(fake.texts[0]).toContain('Coding session stopped');
+        await handler.handle(message({ text: '/code_stop' }), '', { SHARE_CONTEXT: { botToken: '123:test' } } as never);
+        expect(stop).toHaveBeenCalledWith('10', '10');
+        expect(fake.texts[0]).toContain('still stopping');
+        expect(fake.texts[0]).not.toContain('cancelled.');
+    });
+
+    it('reports confirmed cancellation', async () => {
+        const fake = replyFactory();
+        const handler = new CodeStopCommandHandler({
+            coordinator: coordinatorFactory(
+                fakeCoordinator({
+                    stopSession: vi.fn(async () =>
+                        durableSession({ status: 'cancelled', cancellationRequested: true }),
+                    ),
+                }),
+            ),
+            reply: fake.factory,
+        });
+        await handler.handle(message({ text: '/code_stop' }), '', { SHARE_CONTEXT: { botToken: '123:test' } } as never);
+        expect(fake.texts[0]).toContain('Coding session cancelled');
     });
 
     it('handles a missing session safely', async () => {
         const fake = replyFactory();
         const handler = new CodeStopCommandHandler({
-            manager: manager({ stopSession: vi.fn(async () => null) }),
+            coordinator: coordinatorFactory(fakeCoordinator({ stopSession: vi.fn(async () => null) })),
             reply: fake.factory,
         });
-        await handler.handle(message({ text: '/code_stop' }), '', context());
+        await handler.handle(message({ text: '/code_stop' }), '', { SHARE_CONTEXT: { botToken: '123:test' } } as never);
         expect(fake.texts[0]).toContain('No active coding session');
     });
 });

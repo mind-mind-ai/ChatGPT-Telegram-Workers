@@ -2,25 +2,29 @@ import type { GitHubService } from '@chatgpt-telegram-workers/agent';
 import type * as Telegram from 'telegram-bot-api-types';
 import type { WorkerContext } from '../context';
 import type { MessageHandler, UpdateHandler } from './types';
-import type { CodingSessionManager } from '../coding/manager';
-import { getDefaultCodingManager, getDefaultGitHubService } from '../coding/runtime';
-import { createMessageReply, createReplyForUpdate, sendLongText, type CodingReply } from '../coding/telegram';
-import { CodingSessionError, codingErrorMessage } from '../coding/types';
+import { createDefaultCodingCoordinator, getDefaultGitHubService } from '../coding/runtime';
+import { createMessageReply, createReplyForUpdate, type CodingReply } from '../coding/telegram';
+import {
+    CodingSessionError,
+    codingErrorMessage,
+    type CodingCoordinatorFactory,
+    type CodingDurableSession,
+} from '../coding/types';
 
 export interface CodingCallbackDependencies {
-    manager: CodingSessionManager;
+    coordinator: CodingCoordinatorFactory;
     github: GitHubService;
     reply: (token: string, update: Telegram.Update) => CodingReply;
 }
 
 export interface CodingMessageDependencies {
-    manager: CodingSessionManager;
+    coordinator: CodingCoordinatorFactory;
     reply: (token: string, message: Telegram.Message) => CodingReply;
 }
 
 function defaultCallbackDependencies(): CodingCallbackDependencies {
     return {
-        manager: getDefaultCodingManager(),
+        coordinator: createDefaultCodingCoordinator,
         github: getDefaultGitHubService(),
         reply: createReplyForUpdate,
     };
@@ -28,7 +32,7 @@ function defaultCallbackDependencies(): CodingCallbackDependencies {
 
 function defaultMessageDependencies(): CodingMessageDependencies {
     return {
-        manager: getDefaultCodingManager(),
+        coordinator: createDefaultCodingCoordinator,
         reply: createMessageReply,
     };
 }
@@ -44,6 +48,10 @@ function privateIdentity(message: Telegram.Message): { userId: string; chatId: s
 
 function ok(): Response {
     return new Response('OK', { status: 200 });
+}
+
+function isActive(session: CodingDurableSession): boolean {
+    return ['queued', 'running', 'awaiting_input', 'cancelling'].includes(session.status);
 }
 
 export class CodingCallbackHandler implements UpdateHandler {
@@ -78,8 +86,9 @@ export class CodingCallbackHandler implements UpdateHandler {
 
         try {
             const deps = this.deps ?? defaultCallbackDependencies();
-            const existing = await deps.manager.getSession(identity.userId, identity.chatId);
-            if (existing) {
+            const coordinator = deps.coordinator(identity.userId, identity.chatId);
+            const existing = await coordinator.getState(identity.userId, identity.chatId);
+            if (existing && isActive(existing)) {
                 await reply.answerCallback('A coding session is already active');
                 await reply.sendText('A coding session is already active. Use /code_status or /code_stop first.');
                 return ok();
@@ -97,9 +106,15 @@ export class CodingCallbackHandler implements UpdateHandler {
             }
 
             await reply.answerCallback('Starting coding session');
-            await reply.sendText(`Starting coding session for ${repository.fullName}...`);
-            await deps.manager.startSession(identity.userId, identity.chatId, repository.fullName);
-            await reply.sendText('Repository loaded. What would you like me to do?');
+            await coordinator.createSession({
+                userId: identity.userId,
+                chatId: identity.chatId,
+                repository: repository.fullName,
+                telegram: { chatId },
+            });
+            await reply.sendText(
+                `Repository loading in the background for ${repository.fullName}. I will send progress here.`,
+            );
         } catch (error) {
             await reply.answerCallback('Could not start coding session');
             if (error instanceof CodingSessionError) {
@@ -121,7 +136,14 @@ export class CodingMessageHandler implements MessageHandler {
             return null;
         }
         const deps = this.deps ?? defaultMessageDependencies();
-        const session = await deps.manager.getSession(identity.userId, identity.chatId);
+        const coordinator = deps.coordinator(identity.userId, identity.chatId);
+        let session: CodingDurableSession | null;
+        try {
+            session = await coordinator.getState(identity.userId, identity.chatId);
+        } catch {
+            // Do not turn an unavailable coding backend into a normal chat failure.
+            return null;
+        }
         if (!session) {
             return null;
         }
@@ -130,11 +152,17 @@ export class CodingMessageHandler implements MessageHandler {
         if (message.photo?.length || message.document) {
             return reply.sendText('Coding sessions accept text instructions only.');
         }
+        if (session.status === 'queued') {
+            return reply.sendText('The coding job is queued. I will send progress when it starts.');
+        }
         if (session.status === 'running') {
             return reply.sendText('The coding agent is already working. Wait for the result or use /code_stop.');
         }
-        if (session.status === 'initializing') {
-            return reply.sendText('The coding session is still starting. Please wait a moment.');
+        if (session.status === 'cancelling') {
+            return reply.sendText('The coding job is still stopping. Use /code_status to confirm it has stopped.');
+        }
+        if (session.status === 'failed' || session.status === 'cancelled') {
+            return reply.sendText('This coding session has ended. Use /code to start a new one.');
         }
 
         const instruction = (message.text ?? message.caption ?? '').trim();
@@ -142,24 +170,22 @@ export class CodingMessageHandler implements MessageHandler {
             return reply.sendText('Send a text instruction for the coding agent.');
         }
 
-        await reply.sendText(`Working on ${session.repository}...`);
         try {
-            const result = await deps.manager.runInstruction(session, instruction);
-            return sendLongText(reply, result.text || 'The coding agent returned an empty response.');
+            await coordinator.enqueueInstruction({
+                userId: identity.userId,
+                chatId: identity.chatId,
+                instruction,
+                telegram: { chatId: Number(identity.chatId) },
+            });
+            return reply.sendText(`Queued the coding job for ${session.repository}. I will send progress here.`);
         } catch (error) {
             if (error instanceof CodingSessionError) {
-                if (error.code === 'cancelled') {
-                    const current = await deps.manager.getSession(identity.userId, identity.chatId);
-                    if (!current) {
-                        return ok();
-                    }
-                }
                 if (error.code === 'expired' || error.code === 'not-found') {
                     return reply.sendText('Coding session expired. Use /code to start a new one.');
                 }
-                return reply.sendText(`Coding session failed: ${error.message}`);
+                return reply.sendText(`Could not queue coding job: ${error.message}`);
             }
-            return reply.sendText(`Coding session failed: ${codingErrorMessage(error)}`);
+            return reply.sendText(`Could not queue coding job: ${codingErrorMessage(error)}`);
         }
     };
 }

@@ -34,6 +34,18 @@ describe('AgentRuntime', () => {
         expect(requests[0].toolChoice).toBe('auto');
     });
 
+    it('forwards an optional coding system prompt without changing normal chat', async () => {
+        const normal = scriptedLLM([{ text: 'hello' }]);
+        await new AgentRuntime(normal.complete).run([USER_MESSAGE], new ToolRegistry());
+        expect(normal.requests[0].system).toBeUndefined();
+
+        const coding = scriptedLLM([{ text: 'done' }]);
+        await new AgentRuntime(coding.complete).run([USER_MESSAGE], new ToolRegistry(), {
+            system: 'coding-only prompt',
+        });
+        expect(coding.requests[0].system).toBe('coding-only prompt');
+    });
+
     it('executes a tool call and feeds the result back to the model', async () => {
         const registry = new ToolRegistry().register({
             name: 'echo',

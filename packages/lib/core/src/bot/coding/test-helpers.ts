@@ -9,7 +9,7 @@ import {
 import type * as Telegram from 'telegram-bot-api-types';
 import type { WorkerContext } from '../context';
 import type { CodingReply } from './telegram';
-import type { CodingSessionState } from './types';
+import type { CodingDurableSession, CodingJobState, CodingSessionCoordinator, CodingSessionState } from './types';
 
 export class MemoryKV implements KVNamespaceBinding {
     readonly values = new Map<string, string>();
@@ -159,4 +159,55 @@ export function textMessage(text: string, overrides: Partial<Telegram.Message> =
 
 export function assistantMessage(text: string): Message {
     return { role: 'assistant', content: text };
+}
+
+export function durableJob(overrides: Partial<CodingJobState> = {}): CodingJobState {
+    return {
+        id: 'job-1',
+        kind: 'checkout',
+        status: 'completed',
+        createdAt: 0,
+        finishedAt: 1,
+        progress: 'Completed',
+        ...overrides,
+    };
+}
+
+export function durableSession(overrides: Partial<CodingDurableSession> = {}): CodingDurableSession {
+    return {
+        version: 2,
+        sessionId: 'session-1',
+        userId: '10',
+        chatId: '10',
+        repository: 'octo/repo',
+        status: 'awaiting_input',
+        cancellationRequested: false,
+        createdAt: 0,
+        updatedAt: 0,
+        expiresAt: Date.now() + 60_000,
+        job: durableJob(),
+        ...overrides,
+    };
+}
+
+export function fakeCoordinator(overrides: Partial<CodingSessionCoordinator> = {}): CodingSessionCoordinator {
+    return {
+        getState: async () => null,
+        createSession: async () =>
+            durableSession({
+                status: 'queued',
+                job: durableJob({ kind: 'checkout', status: 'queued', progress: 'Preparing repository...' }),
+            }),
+        enqueueInstruction: async () =>
+            durableSession({
+                status: 'queued',
+                job: durableJob({ kind: 'instruction', status: 'queued', instruction: 'work' }),
+            }),
+        stopSession: async () => durableSession({ status: 'cancelled', cancellationRequested: true }),
+        ...overrides,
+    };
+}
+
+export function coordinatorFactory(coordinator: CodingSessionCoordinator) {
+    return () => coordinator;
 }

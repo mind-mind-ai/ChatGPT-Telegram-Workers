@@ -18,6 +18,8 @@ export interface AgentLLMRequest {
     messages: Message[];
     tools: ToolDefinition[];
     toolChoice: ToolChoice;
+    /** Overrides the configured chat system prompt for this run. */
+    system?: string;
     signal?: AbortSignal;
 }
 
@@ -40,6 +42,8 @@ export interface AgentRuntimeOptions {
     signal?: AbortSignal;
     /** Defaults to `auto`. */
     toolChoice?: ToolChoice;
+    /** Optional system prompt override; normal chat leaves this unset. */
+    system?: string;
 }
 
 export type CompleteWithToolsOptions = AgentRuntimeOptions;
@@ -173,6 +177,7 @@ export class AgentRuntime {
                         messages: [...conversation],
                         tools: tools.definitions(access),
                         toolChoice,
+                        ...(options.system ? { system: options.system } : {}),
                         signal: scope.signal,
                     }),
                     scope.signal,

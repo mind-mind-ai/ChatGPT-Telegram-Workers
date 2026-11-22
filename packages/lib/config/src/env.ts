@@ -41,6 +41,8 @@ class Environment {
     DATABASE: KVNamespaceBinding = null as any;
     /** Cloudflare SANDBOX Durable Object namespace; typed by the sandbox package. */
     SANDBOX: unknown = null;
+    /** Cloudflare CODING_SESSION Durable Object namespace. */
+    CODING_SESSION: unknown = null;
 
     // -- 运行时 --
     I18N: I18n = loadI18n();
@@ -69,6 +71,9 @@ class Environment {
         }
         if (source.SANDBOX) {
             this.SANDBOX = source.SANDBOX;
+        }
+        if (source.CODING_SESSION) {
+            this.CODING_SESSION = source.CODING_SESSION;
         }
         if (source.TELEGRAM_TOKEN) {
             this.TELEGRAM_TOKEN = `${source.TELEGRAM_TOKEN}`.trim();

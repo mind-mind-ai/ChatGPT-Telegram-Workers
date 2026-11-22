@@ -37,13 +37,20 @@
         },
     ],
     "durable_objects": {
-        "bindings": [{ "name": "SANDBOX", "class_name": "SandboxDurableObject" }],
+        "bindings": [
+            { "name": "SANDBOX", "class_name": "SandboxDurableObject" },
+            { "name": "CODING_SESSION", "class_name": "CodingSessionDurableObject" },
+        ],
     },
     "exports": {
         "SandboxDurableObject": {
             "type": "durable-object",
             "storage": "sqlite",
             "container": "sandbox",
+        },
+        "CodingSessionDurableObject": {
+            "type": "durable-object",
+            "storage": "sqlite",
         },
     },
 

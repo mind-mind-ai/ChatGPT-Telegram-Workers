@@ -1,20 +1,17 @@
 import type * as Telegram from 'telegram-bot-api-types';
 import { describe, expect, it, vi } from 'vitest';
-import type { CodingSessionManager } from '../coding/manager';
 import { CodingSessionError } from '../coding/types';
-import { context, fakeGithub, fakeReply, message, session } from '../coding/test-helpers';
+import {
+    context,
+    coordinatorFactory,
+    durableJob,
+    durableSession,
+    fakeCoordinator,
+    fakeGithub,
+    fakeReply,
+    message,
+} from '../coding/test-helpers';
 import { CodingCallbackHandler, CodingMessageHandler } from './coding';
-
-function manager(overrides: Partial<CodingSessionManager> = {}): CodingSessionManager {
-    return {
-        getSession: vi.fn(async () => null),
-        startSession: vi.fn(async () => session()),
-        stopSession: vi.fn(async () => session()),
-        statusLabel: vi.fn(() => 'idle (awaiting input)'),
-        runInstruction: vi.fn(async () => ({ text: 'done', steps: 1, stopReason: 'complete' as const })),
-        ...overrides,
-    } as unknown as CodingSessionManager;
-}
 
 function callbackUpdate(data: string, fromId = 10, chatId = 10, chatType = 'private'): Telegram.Update {
     return {
@@ -39,78 +36,88 @@ function callbackReply() {
 }
 
 describe('CodingCallbackHandler', () => {
-    it('starts a coding session for an authorized repository selection', async () => {
+    it('queues a background coding session for an authorized repository selection', async () => {
         const fake = callbackReply();
-        const start = vi.fn(async () => session());
+        const create = vi.fn(async () => durableSession({ status: 'queued' }));
         const handler = new CodingCallbackHandler({
-            manager: manager({ startSession: start }),
+            coordinator: coordinatorFactory(fakeCoordinator({ createSession: create })),
             github: fakeGithub({ repositories: ['octo/repo'] }),
             reply: fake.factory,
         });
 
         const response = await handler.handle(callbackUpdate('code:repo:0'), context());
         expect(response?.status).toBe(200);
-        expect(start).toHaveBeenCalledWith('10', '10', 'octo/repo');
+        expect(create).toHaveBeenCalledWith({
+            userId: '10',
+            chatId: '10',
+            repository: 'octo/repo',
+            telegram: { chatId: 10 },
+        });
         expect(fake.answers).toContain('Starting coding session');
-        expect(fake.texts.at(-1)).toContain('Repository loaded');
+        expect(fake.texts.at(-1)).toContain('loading in the background');
     });
 
     it('rejects callbacks from a different user or a group', async () => {
         const mismatch = callbackReply();
-        const mismatchStart = vi.fn();
+        const mismatchCreate = vi.fn();
         await new CodingCallbackHandler({
-            manager: manager({ startSession: mismatchStart }),
+            coordinator: coordinatorFactory(fakeCoordinator({ createSession: mismatchCreate })),
             github: fakeGithub(),
             reply: mismatch.factory,
         }).handle(callbackUpdate('code:repo:0', 11, 10), context());
-        expect(mismatchStart).not.toHaveBeenCalled();
+        expect(mismatchCreate).not.toHaveBeenCalled();
         expect(mismatch.answers[0]).toContain('does not belong');
 
         const group = callbackReply();
-        const groupStart = vi.fn();
+        const groupCreate = vi.fn();
         await new CodingCallbackHandler({
-            manager: manager({ startSession: groupStart }),
+            coordinator: coordinatorFactory(fakeCoordinator({ createSession: groupCreate })),
             github: fakeGithub(),
             reply: group.factory,
         }).handle(callbackUpdate('code:repo:0', 10, 10, 'group'), context());
-        expect(groupStart).not.toHaveBeenCalled();
+        expect(groupCreate).not.toHaveBeenCalled();
         expect(group.answers[0]).toContain('private chats');
     });
 
     it('rejects stale, unauthorized and duplicate repository selections', async () => {
         const stale = callbackReply();
-        const staleStart = vi.fn();
+        const staleCreate = vi.fn();
         await new CodingCallbackHandler({
-            manager: manager({ startSession: staleStart }),
+            coordinator: coordinatorFactory(fakeCoordinator({ createSession: staleCreate })),
             github: fakeGithub({ repositories: ['octo/repo'] }),
             reply: stale.factory,
         }).handle(callbackUpdate('code:repo:4'), context());
-        expect(staleStart).not.toHaveBeenCalled();
+        expect(staleCreate).not.toHaveBeenCalled();
         expect(stale.answers[0]).toContain('list changed');
 
         const unauthorized = callbackReply();
-        const unauthorizedStart = vi.fn();
+        const unauthorizedCreate = vi.fn();
         await new CodingCallbackHandler({
-            manager: manager({ startSession: unauthorizedStart }),
+            coordinator: coordinatorFactory(fakeCoordinator({ createSession: unauthorizedCreate })),
             github: fakeGithub({ repositories: [] }),
             reply: unauthorized.factory,
         }).handle(callbackUpdate('code:repo:0'), context());
-        expect(unauthorizedStart).not.toHaveBeenCalled();
+        expect(unauthorizedCreate).not.toHaveBeenCalled();
 
         const duplicate = callbackReply();
-        const duplicateStart = vi.fn();
+        const duplicateCreate = vi.fn();
         await new CodingCallbackHandler({
-            manager: manager({ getSession: vi.fn(async () => session()), startSession: duplicateStart }),
+            coordinator: coordinatorFactory(
+                fakeCoordinator({
+                    getState: vi.fn(async () => durableSession()),
+                    createSession: duplicateCreate,
+                }),
+            ),
             github: fakeGithub(),
             reply: duplicate.factory,
         }).handle(callbackUpdate('code:repo:0'), context());
-        expect(duplicateStart).not.toHaveBeenCalled();
+        expect(duplicateCreate).not.toHaveBeenCalled();
         expect(duplicate.texts[0]).toContain('already active');
     });
 
     it('ignores non-coding callbacks', async () => {
         const handler = new CodingCallbackHandler({
-            manager: manager(),
+            coordinator: coordinatorFactory(fakeCoordinator()),
             github: fakeGithub(),
             reply: callbackReply().factory,
         });
@@ -119,60 +126,59 @@ describe('CodingCallbackHandler', () => {
 });
 
 describe('CodingMessageHandler', () => {
-    it('routes only active coding sessions and sends progress plus final result', async () => {
+    it('queues instructions instead of running them in the webhook', async () => {
         const fake = fakeReply();
-        const run = vi.fn(async () => ({ text: 'final answer', steps: 2, stopReason: 'complete' as const }));
+        const enqueue = vi.fn(async () =>
+            durableSession({
+                status: 'queued',
+                job: durableJob({ kind: 'instruction', status: 'queued', instruction: 'find the bug' }),
+            }),
+        );
         const handler = new CodingMessageHandler({
-            manager: manager({ getSession: vi.fn(async () => session()), runInstruction: run }),
+            coordinator: coordinatorFactory(
+                fakeCoordinator({ getState: vi.fn(async () => durableSession()), enqueueInstruction: enqueue }),
+            ),
             reply: () => fake.reply,
         });
 
         const response = await handler.handle(message({ text: 'find the bug' }), context());
         expect(response?.status).toBe(200);
-        expect(run).toHaveBeenCalledWith(expect.objectContaining({ repository: 'octo/repo' }), 'find the bug');
-        expect(fake.texts[0]).toContain('Working on octo/repo');
-        expect(fake.texts[1]).toBe('final answer');
-    });
-
-    it('splits long final results before sending', async () => {
-        const fake = fakeReply();
-        const long = 'x'.repeat(9000);
-        const handler = new CodingMessageHandler({
-            manager: manager({
-                getSession: vi.fn(async () => session()),
-                runInstruction: vi.fn(async () => ({ text: long, steps: 1, stopReason: 'complete' as const })),
-            }),
-            reply: () => fake.reply,
+        expect(enqueue).toHaveBeenCalledWith({
+            userId: '10',
+            chatId: '10',
+            instruction: 'find the bug',
+            telegram: { chatId: 10 },
         });
-        await handler.handle(message({ text: 'work' }), context());
-        const resultParts = fake.texts.filter(text => text !== 'Working on octo/repo...');
-        expect(resultParts.length).toBeGreaterThan(1);
-        expect(resultParts.every(part => part.length <= 4096)).toBe(true);
-        expect(resultParts.join('')).toBe(long);
+        expect(fake.texts[0]).toContain('Queued the coding job');
     });
 
     it('leaves ordinary chat alone when there is no session', async () => {
         const handler = new CodingMessageHandler({
-            manager: manager({ getSession: vi.fn(async () => null) }),
+            coordinator: coordinatorFactory(fakeCoordinator({ getState: vi.fn(async () => null) })),
             reply: () => fakeReply().reply,
         });
         await expect(handler.handle(message({ text: 'ordinary chat' }), context())).resolves.toBeNull();
     });
 
-    it('does not run while busy and rejects non-text messages', async () => {
+    it('does not queue while busy and rejects non-text messages', async () => {
         const running = fakeReply();
-        const run = vi.fn();
+        const enqueue = vi.fn();
         const runningHandler = new CodingMessageHandler({
-            manager: manager({ getSession: vi.fn(async () => session({ status: 'running' })), runInstruction: run }),
+            coordinator: coordinatorFactory(
+                fakeCoordinator({
+                    getState: vi.fn(async () => durableSession({ status: 'running' })),
+                    enqueueInstruction: enqueue,
+                }),
+            ),
             reply: () => running.reply,
         });
         await runningHandler.handle(message({ text: 'more work' }), context());
-        expect(run).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
         expect(running.texts[0]).toContain('already working');
 
         const photo = fakeReply();
         const photoHandler = new CodingMessageHandler({
-            manager: manager({ getSession: vi.fn(async () => session()) }),
+            coordinator: coordinatorFactory(fakeCoordinator({ getState: vi.fn(async () => durableSession()) })),
             reply: () => photo.reply,
         });
         await photoHandler.handle(
@@ -185,34 +191,35 @@ describe('CodingMessageHandler', () => {
         expect(photo.texts[0]).toContain('text instructions only');
     });
 
-    it('handles cancellation without sending a second failure message', async () => {
-        const fake = fakeReply();
-        const handler = new CodingMessageHandler({
-            manager: manager({
-                getSession: vi.fn().mockResolvedValueOnce(session()).mockResolvedValueOnce(null),
-                runInstruction: vi.fn(async () => {
-                    throw new CodingSessionError('cancelled', 'Coding operation cancelled');
+    it('reports expired sessions and queue failures', async () => {
+        const expired = fakeReply();
+        const expiredHandler = new CodingMessageHandler({
+            coordinator: coordinatorFactory(
+                fakeCoordinator({
+                    getState: vi.fn(async () => durableSession()),
+                    enqueueInstruction: vi.fn(async () => {
+                        throw new CodingSessionError('expired', 'Coding session expired');
+                    }),
                 }),
-            }),
-            reply: () => fake.reply,
+            ),
+            reply: () => expired.reply,
         });
-        const response = await handler.handle(message({ text: 'work' }), context());
-        expect(response?.status).toBe(200);
-        expect(fake.texts.some(text => text.includes('failed'))).toBe(false);
-    });
+        await expiredHandler.handle(message({ text: 'work' }), context());
+        expect(expired.texts[0]).toContain('expired');
 
-    it('reports agent failures while keeping the session available', async () => {
-        const fake = fakeReply();
-        const handler = new CodingMessageHandler({
-            manager: manager({
-                getSession: vi.fn(async () => session()),
-                runInstruction: vi.fn(async () => {
-                    throw new CodingSessionError('agent', 'model unavailable');
+        const failed = fakeReply();
+        const failedHandler = new CodingMessageHandler({
+            coordinator: coordinatorFactory(
+                fakeCoordinator({
+                    getState: vi.fn(async () => durableSession()),
+                    enqueueInstruction: vi.fn(async () => {
+                        throw new CodingSessionError('busy', 'The coding agent is already working');
+                    }),
                 }),
-            }),
-            reply: () => fake.reply,
+            ),
+            reply: () => failed.reply,
         });
-        await handler.handle(message({ text: 'work' }), context());
-        expect(fake.texts.at(-1)).toContain('model unavailable');
+        await failedHandler.handle(message({ text: 'work' }), context());
+        expect(failed.texts[0]).toContain('already working');
     });
 });

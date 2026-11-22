@@ -2,30 +2,35 @@ import type { GitHubService } from '@chatgpt-telegram-workers/agent';
 import type * as Telegram from 'telegram-bot-api-types';
 import type { WorkerContext } from '../context';
 import type { CommandHandler } from './types';
-import { getDefaultCodingManager, getDefaultGitHubService } from '../coding/runtime';
-import type { CodingSessionManager } from '../coding/manager';
+import { createDefaultCodingCoordinator, getDefaultGitHubService } from '../coding/runtime';
 import { createMessageReply, type CodingReply } from '../coding/telegram';
-import { CodingSessionError, codingErrorMessage } from '../coding/types';
+import {
+    CodingSessionError,
+    codingErrorMessage,
+    type CodingCoordinatorFactory,
+    type CodingDurableSession,
+    type CodingJobStatus,
+} from '../coding/types';
 
-export interface CodingManagerDependencies {
-    manager: CodingSessionManager;
+export interface CodingCoordinatorDependencies {
+    coordinator: CodingCoordinatorFactory;
     reply: (token: string, message: Telegram.Message) => CodingReply;
 }
 
-export interface CodingCommandDependencies extends CodingManagerDependencies {
+export interface CodingCommandDependencies extends CodingCoordinatorDependencies {
     github: GitHubService;
 }
 
-function defaultManagerDependencies(): CodingManagerDependencies {
+function defaultCoordinatorDependencies(): CodingCoordinatorDependencies {
     return {
-        manager: getDefaultCodingManager(),
+        coordinator: createDefaultCodingCoordinator,
         reply: createMessageReply,
     };
 }
 
 function defaultDependencies(): CodingCommandDependencies {
     return {
-        ...defaultManagerDependencies(),
+        ...defaultCoordinatorDependencies(),
         github: getDefaultGitHubService(),
     };
 }
@@ -37,6 +42,46 @@ function privateIdentity(message: Telegram.Message): { userId: string; chatId: s
         return null;
     }
     return { userId: `${userId}`, chatId: `${chatId}` };
+}
+
+export function codingStatusLabel(status: CodingJobStatus): string {
+    switch (status) {
+        case 'queued':
+            return 'queued';
+        case 'running':
+            return 'running';
+        case 'awaiting_input':
+            return 'idle (awaiting input)';
+        case 'cancelling':
+            return 'cancelling';
+        case 'cancelled':
+            return 'cancelled';
+        case 'completed':
+            return 'completed';
+        case 'failed':
+            return 'failed';
+    }
+}
+
+function formatStatus(session: CodingDurableSession): string {
+    const lines = [
+        `Repository: ${session.repository}`,
+        `Session: ${session.sessionId}`,
+        `Status: ${codingStatusLabel(session.status)}`,
+    ];
+    if (session.job) {
+        lines.push(`Job: ${session.job.kind} / ${codingStatusLabel(session.job.status)}`);
+        if (session.job.progress) {
+            lines.push(`Progress: ${session.job.progress}`);
+        }
+        if (session.job.error) {
+            lines.push(`Error: ${session.job.error}`);
+        }
+    }
+    if (session.cancellationRequested) {
+        lines.push('Cancellation: requested');
+    }
+    return lines.join('\n');
 }
 
 export class CodeCommandHandler implements CommandHandler {
@@ -53,8 +98,9 @@ export class CodeCommandHandler implements CommandHandler {
         }
         try {
             const deps = this.deps ?? defaultDependencies();
-            const existing = await deps.manager.getSession(identity.userId, identity.chatId);
-            if (existing) {
+            const coordinator = deps.coordinator(identity.userId, identity.chatId);
+            const existing = await coordinator.getState(identity.userId, identity.chatId);
+            if (existing && ['queued', 'running', 'awaiting_input', 'cancelling'].includes(existing.status)) {
                 return reply.sendText('A coding session is already active. Use /code_status or /code_stop first.');
             }
             const repositories = await deps.github.listAuthorizedRepositories({
@@ -86,7 +132,7 @@ export class CodeStatusCommandHandler implements CommandHandler {
     command = '/code_status';
     scopes = ['all_private_chats'];
 
-    constructor(private readonly deps?: CodingManagerDependencies) {}
+    constructor(private readonly deps?: CodingCoordinatorDependencies) {}
 
     handle = async (message: Telegram.Message, _subcommand: string, context: WorkerContext): Promise<Response> => {
         const reply = (this.deps?.reply ?? createMessageReply)(context.SHARE_CONTEXT.botToken, message);
@@ -95,18 +141,13 @@ export class CodeStatusCommandHandler implements CommandHandler {
             return reply.sendText('Coding sessions are only available in private chats.');
         }
         try {
-            const deps = this.deps ?? defaultManagerDependencies();
-            const session = await deps.manager.getSession(identity.userId, identity.chatId);
+            const deps = this.deps ?? defaultCoordinatorDependencies();
+            const coordinator = deps.coordinator(identity.userId, identity.chatId);
+            const session = await coordinator.getState(identity.userId, identity.chatId);
             if (!session) {
                 return reply.sendText('No active coding session. Use /code to start one.');
             }
-            return reply.sendText(
-                [
-                    `Repository: ${session.repository}`,
-                    `Status: ${deps.manager.statusLabel(session)}`,
-                    `Session: ${session.sessionId}`,
-                ].join('\n'),
-            );
+            return reply.sendText(formatStatus(session));
         } catch (error) {
             return reply.sendText(`Could not read coding status: ${codingErrorMessage(error)}`);
         }
@@ -117,7 +158,7 @@ export class CodeStopCommandHandler implements CommandHandler {
     command = '/code_stop';
     scopes = ['all_private_chats'];
 
-    constructor(private readonly deps?: CodingManagerDependencies) {}
+    constructor(private readonly deps?: CodingCoordinatorDependencies) {}
 
     handle = async (message: Telegram.Message, _subcommand: string, context: WorkerContext): Promise<Response> => {
         const reply = (this.deps?.reply ?? createMessageReply)(context.SHARE_CONTEXT.botToken, message);
@@ -126,9 +167,24 @@ export class CodeStopCommandHandler implements CommandHandler {
             return reply.sendText('Coding sessions are only available in private chats.');
         }
         try {
-            const deps = this.deps ?? defaultManagerDependencies();
-            const stopped = await deps.manager.stopSession(identity.userId, identity.chatId);
-            return reply.sendText(stopped ? 'Coding session stopped.' : 'No active coding session.');
+            const deps = this.deps ?? defaultCoordinatorDependencies();
+            const coordinator = deps.coordinator(identity.userId, identity.chatId);
+            const stopped = await coordinator.stopSession(identity.userId, identity.chatId);
+            if (!stopped) {
+                return reply.sendText('No active coding session.');
+            }
+            if (stopped.status === 'cancelling') {
+                return reply.sendText(
+                    'Cancellation requested. The job is still stopping; use /code_status to confirm it has stopped.',
+                );
+            }
+            if (stopped.status === 'cancelled') {
+                return reply.sendText('Coding session cancelled.');
+            }
+            if (stopped.status === 'failed') {
+                return reply.sendText('The coding session had already failed.');
+            }
+            return reply.sendText('Coding session stopped.');
         } catch (error) {
             return reply.sendText(`Could not stop coding session: ${codingErrorMessage(error)}`);
         }

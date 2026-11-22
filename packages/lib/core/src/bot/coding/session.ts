@@ -1,15 +1,13 @@
 import type { Message } from '@chatgpt-telegram-workers/agent';
 import type { KVNamespaceBinding } from '@chatgpt-telegram-workers/config';
+import { CodingHistoryStore } from './history';
 import type { CodingSessionState, CodingSessionStatus } from './types';
 
 const SESSION_PREFIX = 'coding:session:';
-const HISTORY_PREFIX = 'coding:history:';
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
 const USER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const DEFAULT_TTL_SECONDS = 30 * 60;
-const MAX_HISTORY_MESSAGES = 40;
-const MAX_HISTORY_CHARS = 60_000;
 
 function encodeKeyPart(value: string): string {
     return encodeURIComponent(value);
@@ -19,43 +17,9 @@ function sessionKey(userId: string, chatId: string): string {
     return `${SESSION_PREFIX}${encodeKeyPart(chatId)}:${encodeKeyPart(userId)}`;
 }
 
-function historyKey(session: CodingSessionState): string {
-    return `${HISTORY_PREFIX}${encodeKeyPart(session.chatId)}:${encodeKeyPart(session.userId)}:${session.sessionId}`;
-}
-
-function textLength(message: Message): number {
-    if (typeof message.content === 'string') {
-        return message.content.length;
-    }
-    return message.content.reduce(
-        (sum, part) => sum + (part && part.type === 'text' && typeof part.text === 'string' ? part.text.length : 0),
-        0,
-    );
-}
-
-function isMessage(value: unknown): value is Message {
-    if (!value || typeof value !== 'object') {
-        return false;
-    }
-    const candidate = value as { role?: unknown; content?: unknown };
-    if (candidate.role !== 'user' && candidate.role !== 'assistant' && candidate.role !== 'system') {
-        return false;
-    }
-    return typeof candidate.content === 'string' || Array.isArray(candidate.content);
-}
-
-function trimHistory(history: Message[]): Message[] {
-    let result = history.filter(isMessage).slice(-MAX_HISTORY_MESSAGES);
-    let chars = result.reduce((sum, message) => sum + textLength(message), 0);
-    while (result.length > 2 && chars > MAX_HISTORY_CHARS) {
-        const removed = result.shift();
-        chars -= removed ? textLength(removed) : 0;
-    }
-    return result;
-}
-
 export class CodingSessionStore {
     private readonly ttlSeconds: number;
+    private readonly history: CodingHistoryStore;
 
     constructor(
         private readonly kv: KVNamespaceBinding,
@@ -64,6 +28,7 @@ export class CodingSessionStore {
         private readonly idFactory: () => string = () => crypto.randomUUID(),
     ) {
         this.ttlSeconds = Math.max(60, Math.trunc(ttlSeconds));
+        this.history = new CodingHistoryStore(kv, this.ttlSeconds);
     }
 
     async get(userId: string, chatId: string): Promise<CodingSessionState | null> {
@@ -151,20 +116,11 @@ export class CodingSessionStore {
             return;
         }
         await this.kv.delete(sessionKey(session.userId, session.chatId));
-        await this.kv.delete(historyKey(session));
+        await this.history.clear(session.userId, session.chatId, session.sessionId);
     }
 
     async loadHistory(session: CodingSessionState): Promise<Message[]> {
-        const raw = await this.kv.get(historyKey(session));
-        if (!raw) {
-            return [];
-        }
-        try {
-            const parsed = JSON.parse(typeof raw === 'string' ? raw : String(raw));
-            return Array.isArray(parsed) ? trimHistory(parsed) : [];
-        } catch {
-            return [];
-        }
+        return this.history.load(session.userId, session.chatId, session.sessionId);
     }
 
     async appendHistory(session: CodingSessionState, user: Message, assistant: Message): Promise<void> {
@@ -172,14 +128,11 @@ export class CodingSessionStore {
         if (!current || current.sessionId !== session.sessionId) {
             return;
         }
-        const history = [...(await this.loadHistory(session)), user, assistant];
-        await this.kv.put(historyKey(session), JSON.stringify(trimHistory(history)), {
-            expirationTtl: this.ttlSeconds,
-        });
+        await this.history.append(session.userId, session.chatId, session.sessionId, user, assistant);
     }
 
     async clearHistory(session: CodingSessionState): Promise<void> {
-        await this.kv.delete(historyKey(session));
+        await this.history.clear(session.userId, session.chatId, session.sessionId);
     }
 
     statusLabel(status: CodingSessionStatus): string {
@@ -206,9 +159,7 @@ export class CodingSessionStore {
     ): Promise<void> {
         await this.kv.delete(sessionKey(userId, chatId));
         if (session?.sessionId && SESSION_ID_PATTERN.test(session.sessionId)) {
-            await this.kv.delete(
-                `${HISTORY_PREFIX}${encodeKeyPart(chatId)}:${encodeKeyPart(userId)}:${session.sessionId}`,
-            );
+            await this.history.clear(userId, chatId, session.sessionId);
         }
     }
 }

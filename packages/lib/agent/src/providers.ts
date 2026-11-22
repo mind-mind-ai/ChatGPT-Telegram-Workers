@@ -54,11 +54,12 @@ function buildChatOptions(
     signal: AbortSignal | undefined,
     tools?: ToolDefinition[],
     toolChoice?: ToolChoice,
+    system?: string,
 ): CompletionOptions {
     const extra = provider.extraParams ?? {};
     return {
         model: provider.model,
-        system: settings.systemInitMessage || undefined,
+        system: (system ?? settings.systemInitMessage) || undefined,
         messages,
         signal,
         ...(settings.maxOutputTokens > 0 ? { maxTokens: settings.maxOutputTokens } : {}),
@@ -100,6 +101,7 @@ export function createChatAgent(
             signal,
             request.tools,
             request.toolChoice,
+            request.system,
         );
         try {
             return await client.complete(options);

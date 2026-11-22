@@ -1,26 +1,19 @@
-import type { ChatAgent, Message } from '@chatgpt-telegram-workers/agent';
-import {
-    CODING_TOOL_PERMISSION,
-    createGitHubServiceFromEnv,
-    loadChatLLM,
-    registerCodingTools,
-    registerGitHubTools,
-    ToolRegistry,
-    type GitHubService,
-} from '@chatgpt-telegram-workers/agent';
+import type { ChatAgent } from '@chatgpt-telegram-workers/agent';
+import { createGitHubServiceFromEnv, loadChatLLM, type GitHubService } from '@chatgpt-telegram-workers/agent';
 import { ENV } from '@chatgpt-telegram-workers/config';
 import {
-    SandboxError,
     createDurableObjectSandboxClient,
     type SandboxClient,
     type SandboxNamespaceBinding,
     type SandboxScope,
 } from '@chatgpt-telegram-workers/sandbox';
+import { CodingAgentExecutor } from './executor';
 import { CodingSessionStore } from './session';
 import { CodingSessionError, codingErrorMessage, type CodingRunResult, type CodingSessionState } from './types';
 
 export interface CodingSessionManagerOptions {
     store: CodingSessionStore;
+    executor?: CodingAgentExecutor;
     sandboxFactory?: (scope: SandboxScope) => Promise<SandboxClient>;
     githubFactory?: () => GitHubService;
     agentFactory?: () => ChatAgent | null;
@@ -33,28 +26,32 @@ function sessionMapKey(session: Pick<CodingSessionState, 'userId' | 'chatId' | '
     return `${session.chatId}:${session.userId}:${session.sessionId}`;
 }
 
+/**
+ * Compatibility manager for the synchronous coding path. Telegram production
+ * traffic uses CodingSessionDurableObject; this class keeps the lower-level
+ * session/history semantics testable and available to other callers.
+ */
 export class CodingSessionManager {
     private readonly store: CodingSessionStore;
-    private readonly sandboxFactory: (scope: SandboxScope) => Promise<SandboxClient>;
-    private readonly githubFactory: () => GitHubService;
-    private readonly agentFactory: () => ChatAgent | null;
-    private readonly maxSteps: number;
-    private readonly timeoutMs: number;
-    private readonly toolTimeoutMs: number;
-    private readonly sandboxes = new Map<string, SandboxClient>();
+    private readonly executor: CodingAgentExecutor;
     private readonly activeControllers = new Map<string, AbortController>();
+    private readonly activeInstructions = new Set<string>();
     private readonly starting = new Set<string>();
 
     constructor(options: CodingSessionManagerOptions) {
         this.store = options.store;
-        this.sandboxFactory =
-            options.sandboxFactory ??
-            (scope => createDurableObjectSandboxClient(ENV.SANDBOX as SandboxNamespaceBinding | null, scope));
-        this.githubFactory = options.githubFactory ?? (() => createGitHubServiceFromEnv(ENV));
-        this.agentFactory = options.agentFactory ?? (() => loadChatLLM(ENV.CONFIG));
-        this.maxSteps = options.maxSteps ?? 12;
-        this.timeoutMs = options.timeoutMs ?? 120_000;
-        this.toolTimeoutMs = options.toolTimeoutMs ?? 60_000;
+        this.executor =
+            options.executor ??
+            new CodingAgentExecutor({
+                sandboxFactory:
+                    options.sandboxFactory ??
+                    (scope => createDurableObjectSandboxClient(ENV.SANDBOX as SandboxNamespaceBinding | null, scope)),
+                githubFactory: options.githubFactory ?? (() => createGitHubServiceFromEnv(ENV)),
+                agentFactory: options.agentFactory ?? (() => loadChatLLM(ENV.CONFIG)),
+                maxSteps: options.maxSteps,
+                timeoutMs: options.timeoutMs,
+                toolTimeoutMs: options.toolTimeoutMs,
+            });
     }
 
     async getSession(userId: string, chatId: string): Promise<CodingSessionState | null> {
@@ -72,8 +69,6 @@ export class CodingSessionManager {
         }
         this.starting.add(key);
         let created: CodingSessionState | null = null;
-        let sandbox: SandboxClient | null = null;
-        let phase: 'sandbox' | 'checkout' = 'sandbox';
         try {
             if (await this.store.get(userId, chatId)) {
                 throw new CodingSessionError('active', 'A coding session is already active');
@@ -83,44 +78,21 @@ export class CodingSessionManager {
                 throw new CodingSessionError('active', 'A coding session is already active');
             }
 
-            sandbox = await this.ensureSandbox(created);
-            await sandbox.list('');
-            phase = 'checkout';
-            const access = this.access(created);
-            const github = this.githubFactory();
-            const authorized = await github.listAuthorizedRepositories(access);
-            if (!authorized.some(item => item.fullName.toLowerCase() === created!.repository)) {
-                throw new CodingSessionError('unauthorized', 'Repository is not authorized for this user');
-            }
-
-            const checkout = await this.createRegistry(sandbox, github).execute(
-                { id: 'bootstrap-checkout', name: 'repo_checkout', arguments: '{}' },
-                access,
-            );
-            if (checkout.isError) {
-                throw new CodingSessionError('checkout', checkout.content);
-            }
-
+            await this.executor.prepare(created);
             const ready = await this.store.update(created, { status: 'awaiting_input' });
             if (!ready) {
                 throw new CodingSessionError('cancelled', 'Coding session was stopped');
             }
             return ready;
         } catch (error) {
-            if (sandbox) {
-                await sandbox.destroy().catch(() => undefined);
-            }
             if (created) {
-                this.sandboxes.delete(sessionMapKey(created));
+                await this.executor.destroy(created).catch(() => undefined);
                 await this.store.delete(created).catch(() => undefined);
             }
             if (error instanceof CodingSessionError) {
                 throw error;
             }
-            if (error instanceof SandboxError || phase === 'sandbox') {
-                throw new CodingSessionError('sandbox', codingErrorMessage(error), { cause: error });
-            }
-            throw new CodingSessionError('checkout', codingErrorMessage(error), { cause: error });
+            throw new CodingSessionError('sandbox', codingErrorMessage(error), { cause: error });
         } finally {
             this.starting.delete(key);
         }
@@ -139,9 +111,10 @@ export class CodingSessionManager {
         }
 
         const key = sessionMapKey(current);
-        if (this.activeControllers.has(key)) {
+        if (this.activeControllers.has(key) || this.activeInstructions.has(key)) {
             throw new CodingSessionError('busy', 'The coding agent is already running');
         }
+        this.activeInstructions.add(key);
         const running = await this.store.update(current, { status: 'running' });
         if (!running) {
             throw new CodingSessionError('cancelled', 'Coding session was stopped');
@@ -149,30 +122,22 @@ export class CodingSessionManager {
 
         const controller = new AbortController();
         this.activeControllers.set(key, controller);
-        let phase: 'sandbox' | 'agent' = 'sandbox';
         try {
-            const sandbox = await this.ensureSandbox(current);
-            phase = 'agent';
-            const agent = this.agentFactory();
-            if (!agent) {
-                throw new CodingSessionError('agent', 'No chat model is configured');
-            }
             const history = await this.store.loadHistory(current);
-            const userMessage: Message = { role: 'user', content: instruction };
-            const result = await agent.completeWithTools([...history, userMessage], this.createRegistry(sandbox), {
-                access: this.access(current),
-                signal: controller.signal,
-                maxSteps: this.maxSteps,
-                timeoutMs: this.timeoutMs,
-                toolTimeoutMs: this.toolTimeoutMs,
-            });
-
+            const result = await this.executor.run(current, instruction, history, controller.signal);
             const ready = await this.store.update(current, { status: 'awaiting_input' });
             if (!ready) {
                 throw new CodingSessionError('cancelled', 'Coding session was stopped');
             }
-            await this.store.appendHistory(current, userMessage, { role: 'assistant', content: result.text });
-            return { text: result.text, steps: result.steps, stopReason: result.stopReason };
+            await this.store.appendHistory(
+                current,
+                { role: 'user', content: instruction },
+                {
+                    role: 'assistant',
+                    content: result.text,
+                },
+            );
+            return result;
         } catch (error) {
             if (controller.signal.aborted) {
                 throw new CodingSessionError('cancelled', 'Coding operation cancelled');
@@ -185,11 +150,9 @@ export class CodingSessionManager {
             if (error instanceof CodingSessionError) {
                 throw error;
             }
-            if (error instanceof SandboxError || phase === 'sandbox') {
-                throw new CodingSessionError('sandbox', codingErrorMessage(error), { cause: error });
-            }
             throw new CodingSessionError('agent', codingErrorMessage(error), { cause: error });
         } finally {
+            this.activeInstructions.delete(key);
             this.activeControllers.delete(key);
         }
     }
@@ -203,43 +166,7 @@ export class CodingSessionManager {
         this.activeControllers.get(key)?.abort(new CodingSessionError('cancelled', 'Coding session stopped'));
         this.activeControllers.delete(key);
         await this.store.delete(session);
-        const sandbox = this.sandboxes.get(key);
-        this.sandboxes.delete(key);
-        if (sandbox) {
-            await sandbox.destroy().catch(() => undefined);
-        }
+        await this.executor.destroy(session);
         return session;
-    }
-
-    private access(session: CodingSessionState) {
-        return {
-            userId: session.userId,
-            chatId: session.chatId,
-            repository: session.repository,
-            sessionId: session.sessionId,
-            permissions: [CODING_TOOL_PERMISSION],
-        };
-    }
-
-    private createRegistry(sandbox: SandboxClient, github = this.githubFactory()): ToolRegistry {
-        const registry = new ToolRegistry();
-        registerCodingTools(registry, { sandbox });
-        registerGitHubTools(registry, { service: github, sandbox });
-        return registry;
-    }
-
-    private async ensureSandbox(session: CodingSessionState): Promise<SandboxClient> {
-        const key = sessionMapKey(session);
-        const existing = this.sandboxes.get(key);
-        if (existing) {
-            return existing;
-        }
-        const sandbox = await this.sandboxFactory({
-            userId: session.userId,
-            repository: session.repository,
-            sessionId: session.sessionId,
-        });
-        this.sandboxes.set(key, sandbox);
-        return sandbox;
     }
 }

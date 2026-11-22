@@ -12,5 +12,6 @@ const app = createApp({
 
 export default app;
 
-// Durable Object entrypoint for the sandbox binding declared in wrangler.jsonc.
+// Durable Object entrypoints declared in wrangler.jsonc.
 export { SandboxDurableObject } from '@chatgpt-telegram-workers/sandbox/durable-object';
+export { CodingSessionDurableObject } from '@chatgpt-telegram-workers/core';
