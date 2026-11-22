@@ -8,9 +8,11 @@ import type {
     Part,
     Protocol,
     SSEParseResult,
+    ToolCall,
+    ToolChoice,
     Usage,
 } from './types';
-import { extractSystem, sumTokens } from './common';
+import { assertNoToolsInStream, contentToText, extractSystem, sumTokens } from './common';
 import { joinUrl, parseJSONSync, postJSON } from './fetch';
 import { adaptMessageImages, DEFAULT_IMAGE_MIME_TYPE, resolveImage, toDataURI } from './image';
 import { imageAdaptMode } from './protocols';
@@ -56,9 +58,51 @@ function renderContent(message: Message): any[] {
     return message.content.map(part => renderPart(part, message.role)).filter(part => part !== null);
 }
 
+function buildInput(messages: Message[]): any[] {
+    const input: any[] = [];
+    for (const message of messages) {
+        if (message.role === 'tool') {
+            input.push({
+                type: 'function_call_output',
+                call_id: message.toolCallId,
+                output: contentToText(message.content),
+            });
+            continue;
+        }
+        if (message.role === 'assistant' && message.toolCalls?.length) {
+            const hasContent =
+                typeof message.content === 'string' ? message.content.length > 0 : message.content.length > 0;
+            if (hasContent) {
+                const content = renderContent(message);
+                if (content.length) {
+                    input.push({ role: 'assistant', content });
+                }
+            }
+            for (const call of message.toolCalls) {
+                input.push({
+                    type: 'function_call',
+                    call_id: call.id,
+                    name: call.name,
+                    arguments: call.arguments,
+                });
+            }
+            continue;
+        }
+        input.push({ role: message.role, content: renderContent(message) });
+    }
+    return input;
+}
+
+function renderToolChoice(choice: ToolChoice): unknown {
+    if (typeof choice === 'string') {
+        return choice;
+    }
+    return { type: 'function', name: choice.name };
+}
+
 export function buildResponsesBody(options: CompletionOptions, stream: boolean): any {
     const { system, messages } = extractSystem(options);
-    return {
+    const body: any = {
         ...options.extra,
         model: options.model,
         ...(system ? { instructions: system } : {}),
@@ -66,27 +110,46 @@ export function buildResponsesBody(options: CompletionOptions, stream: boolean):
         ...(options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),
-        input: messages.map(message => ({
-            role: message.role,
-            content: renderContent(message),
-        })),
+        input: buildInput(messages),
     };
+    if (options.tools?.length) {
+        body.tools = options.tools.map(tool => ({
+            type: 'function',
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            ...(tool.parameters ? { parameters: tool.parameters } : {}),
+        }));
+        // tool_choice on validi vain, kun työkaluja on mukana
+        if (options.toolChoice !== undefined) {
+            body.tool_choice = renderToolChoice(options.toolChoice);
+        }
+    }
+    return body;
 }
 
 export function parseResponsesResponse(data: any): CompletionResult {
     if (data?.error) {
         throw new Error(data.error.message || 'Unknown error');
     }
-    const text = (data?.output || [])
+    const output = Array.isArray(data?.output) ? data.output : [];
+    const text = output
         .flatMap((item: any) => item?.content || [])
         .filter((item: any) => item?.type === 'output_text')
         .map((item: any) => item.text ?? '')
         .join('');
+    const toolCalls: ToolCall[] = output
+        .filter((item: any) => item?.type === 'function_call')
+        .map((item: any) => ({
+            id: item.call_id ?? item.id ?? '',
+            name: item.name ?? '',
+            arguments: item.arguments ?? '{}',
+        }));
     const incomplete = data?.incomplete_details?.reason;
     return {
         text,
         usage: toUsage(data?.usage),
         stopReason: incomplete ?? (data?.status === 'completed' ? 'stop' : null),
+        ...(toolCalls.length ? { toolCalls } : {}),
     };
 }
 
@@ -154,6 +217,7 @@ export class ResponsesClient implements LLMClient {
     }
 
     async *stream(options: CompletionOptions): AsyncIterable<string> {
+        assertNoToolsInStream(options);
         const response = await this.request(options, true);
         for await (const sse of iterSSEMessages(response)) {
             const { delta, finish, error } = parseResponsesSSE(sse);

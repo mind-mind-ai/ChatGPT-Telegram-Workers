@@ -41,3 +41,23 @@ export function sumTokens(inputTokens?: number, outputTokens?: number): number |
     }
     return inputTokens + outputTokens;
 }
+
+/**
+ * Streamaus ei tue työkalukutsuja.Anna selkeä virhe sen sijaan, että mallin
+ * pyytämät kutsut katoaisivat hiljaisesti.
+ */
+export function assertNoToolsInStream(options: CompletionOptions): void {
+    if (options.tools?.length) {
+        throw new Error('Tool calling is not supported with streaming responses');
+    }
+}
+
+/** Parsii työkalukutsun argumentit JSON-merkkijonosta;virheellinen syöte → tyhjä objekti */
+export function parseToolArguments(raw: string): Record<string, unknown> {
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}

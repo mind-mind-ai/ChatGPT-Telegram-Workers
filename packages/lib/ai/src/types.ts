@@ -21,11 +21,46 @@ export interface ImagePart {
 
 export type Part = TextPart | ImagePart;
 
-export type Role = 'system' | 'user' | 'assistant';
+/** Työkalun parametrit JSON Schema -muodossa */
+export type ToolParameters = Record<string, unknown>;
+
+/** Mallille tarjottava työkalumääritys */
+export interface ToolDefinition {
+    name: string;
+    description?: string;
+    parameters?: ToolParameters;
+}
+
+/** Provider-riippumaton työkalukutsu;argumentit aina JSON-merkkijonona */
+export interface ToolCall {
+    id: string;
+    name: string;
+    arguments: string;
+}
+
+/** Työkalun tulos, joka lähetetään takaisin mallille */
+export interface ToolResult {
+    toolCallId: string;
+    content: string;
+    isError?: boolean;
+}
+
+/** Työkalun valintatapa;nimetty valinta pakottaa tietyn työkalun */
+export type ToolChoice = 'auto' | 'none' | 'required' | { type: 'tool'; name: string };
+
+export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface Message {
     role: Role;
     content: string | Part[];
+    /** assistant-viestin työkalukutsut */
+    toolCalls?: ToolCall[];
+    /** tool-viestin vastaavan kutsun id */
+    toolCallId?: string;
+    /** tool-viestin työkalun nimi (valinnainen) */
+    name?: string;
+    /** tool-viestin virhelippu */
+    isError?: boolean;
 }
 
 export interface Usage {
@@ -45,12 +80,16 @@ export interface CompletionOptions {
     signal?: AbortSignal;
     headers?: Record<string, string>;
     extra?: Record<string, unknown>;
+    tools?: ToolDefinition[];
+    toolChoice?: ToolChoice;
 }
 
 export interface CompletionResult {
     text: string;
     usage?: Usage;
     stopReason?: string | null;
+    /** Mallin pyytämät työkalukutsut;tyhjä tai puuttuva, jos malli vastasi suoraan */
+    toolCalls?: ToolCall[];
 }
 
 /** 聊天协议标识(与 protocols.ts 的 ChatProtocol 同一来源) */

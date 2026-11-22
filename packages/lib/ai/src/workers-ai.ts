@@ -148,12 +148,20 @@ export class WorkersAIClient implements LLMClient {
         return this.fallback;
     }
 
+    /** Workers AI ei tue työkalukutsuja;anna selkeä virhe ennen kuin pyyntö lähtee. */
+    private assertToolsUnsupported(options: CompletionOptions): void {
+        if (options.tools?.length) {
+            throw new Error('Tool calling is not supported by the workers protocol');
+        }
+    }
+
     /** workers 是纯文本协议:先剥离图片再交给绑定或 REST */
     private async adapt(options: CompletionOptions): Promise<CompletionOptions> {
         return { ...options, messages: await adaptMessageImages(options.messages, 'none', this.config.fetch) };
     }
 
     async complete(options: CompletionOptions): Promise<CompletionResult> {
+        this.assertToolsUnsupported(options);
         const adapted = await this.adapt(options);
         const binding = this.config.binding;
         if (!binding) {
@@ -164,6 +172,7 @@ export class WorkersAIClient implements LLMClient {
     }
 
     async *stream(options: CompletionOptions): AsyncIterable<string> {
+        this.assertToolsUnsupported(options);
         const adapted = await this.adapt(options);
         const binding = this.config.binding;
         if (!binding) {

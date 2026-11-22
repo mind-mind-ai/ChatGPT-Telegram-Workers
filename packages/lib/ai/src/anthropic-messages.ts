@@ -8,9 +8,11 @@ import type {
     Part,
     Protocol,
     SSEParseResult,
+    ToolCall,
+    ToolChoice,
     Usage,
 } from './types';
-import { contentToText, extractSystem, sumTokens } from './common';
+import { assertNoToolsInStream, contentToText, extractSystem, parseToolArguments, sumTokens } from './common';
 import { joinUrl, parseJSONSync, postJSON } from './fetch';
 import { adaptMessageImages, DEFAULT_IMAGE_MIME_TYPE, resolveImage } from './image';
 import { imageAdaptMode } from './protocols';
@@ -55,9 +57,70 @@ function renderContent(content: Message['content']): string | any[] {
     return content.map(renderPart).filter(part => part !== null);
 }
 
+function renderToolUse(call: ToolCall): any {
+    return {
+        type: 'tool_use',
+        id: call.id,
+        name: call.name,
+        input: parseToolArguments(call.arguments),
+    };
+}
+
+function renderAnthropicMessage(message: Message): any {
+    if (message.role === 'assistant' && message.toolCalls?.length) {
+        const parts: any[] =
+            typeof message.content === 'string'
+                ? message.content
+                    ? [{ type: 'text', text: message.content }]
+                    : []
+                : message.content.map(renderPart).filter(part => part !== null);
+        parts.push(...message.toolCalls.map(renderToolUse));
+        return { role: 'assistant', content: parts };
+    }
+    return { role: message.role, content: renderContent(message.content) };
+}
+
+function renderToolResult(message: Message): any {
+    return {
+        type: 'tool_result',
+        tool_use_id: message.toolCallId,
+        content: contentToText(message.content),
+        ...(message.isError ? { is_error: true } : {}),
+    };
+}
+
+function appendAnthropicMessage(messages: any[], message: Message): void {
+    if (message.role === 'tool') {
+        const block = renderToolResult(message);
+        const last = messages.at(-1);
+        // Anthropic odottaa työkalutulokset user-viestin sisällä;yhdistä peräkkäiset.
+        if (
+            last?.role === 'user' &&
+            Array.isArray(last.content) &&
+            last.content.every((part: any) => part.type === 'tool_result')
+        ) {
+            last.content.push(block);
+            return;
+        }
+        messages.push({ role: 'user', content: [block] });
+        return;
+    }
+    messages.push(renderAnthropicMessage(message));
+}
+
+function renderToolChoice(choice: ToolChoice): unknown {
+    if (choice === 'required') {
+        return { type: 'any' };
+    }
+    if (typeof choice === 'string') {
+        return { type: choice };
+    }
+    return { type: 'tool', name: choice.name };
+}
+
 export function buildAnthropicMessagesBody(options: CompletionOptions, stream: boolean): any {
     const { system, messages } = extractSystem(options);
-    return {
+    const body: any = {
         ...options.extra,
         model: options.model,
         max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -66,21 +129,42 @@ export function buildAnthropicMessagesBody(options: CompletionOptions, stream: b
         ...(options.topP !== undefined ? { top_p: options.topP } : {}),
         ...(options.stop ? { stop_sequences: Array.isArray(options.stop) ? options.stop : [options.stop] } : {}),
         ...(stream ? { stream: true } : {}),
-        messages: messages.map(message => ({
-            role: message.role,
-            content: renderContent(message.content),
-        })),
+        messages: [],
     };
+    for (const message of messages) {
+        appendAnthropicMessage(body.messages, message);
+    }
+    if (options.tools?.length) {
+        body.tools = options.tools.map(tool => ({
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            input_schema: tool.parameters ?? { type: 'object', properties: {} },
+        }));
+        // tool_choice on validi vain, kun työkaluja on mukana
+        if (options.toolChoice !== undefined) {
+            body.tool_choice = renderToolChoice(options.toolChoice);
+        }
+    }
+    return body;
 }
 
 export function parseAnthropicMessagesResponse(data: any): CompletionResult {
     if (data?.error) {
         throw new Error(data.error.message || 'Unknown error');
     }
+    const content = Array.isArray(data?.content) ? data.content : [];
+    const toolCalls: ToolCall[] = content
+        .filter((block: any) => block?.type === 'tool_use')
+        .map((block: any) => ({
+            id: block.id ?? '',
+            name: block.name ?? '',
+            arguments: JSON.stringify(block.input ?? {}),
+        }));
     return {
-        text: contentToText(data?.content),
+        text: contentToText(content),
         usage: toUsage(data?.usage),
         stopReason: data?.stop_reason ?? null,
+        ...(toolCalls.length ? { toolCalls } : {}),
     };
 }
 
@@ -147,6 +231,7 @@ export class AnthropicMessagesClient implements LLMClient {
     }
 
     async *stream(options: CompletionOptions): AsyncIterable<string> {
+        assertNoToolsInStream(options);
         const response = await this.request(options, true);
         for await (const sse of iterSSEMessages(response)) {
             const { delta, finish, error } = parseAnthropicMessagesSSE(sse);

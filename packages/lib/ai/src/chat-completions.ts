@@ -8,9 +8,11 @@ import type {
     Part,
     Protocol,
     SSEParseResult,
+    ToolCall,
+    ToolChoice,
     Usage,
 } from './types';
-import { contentToText, sumTokens } from './common';
+import { assertNoToolsInStream, contentToText, sumTokens } from './common';
 import { joinUrl, parseJSONSync, postJSON } from './fetch';
 import { adaptMessageImages, DEFAULT_IMAGE_MIME_TYPE, resolveImage, toDataURI } from './image';
 import { imageAdaptMode } from './protocols';
@@ -49,13 +51,38 @@ function renderPart(part: Part): any | null {
 }
 
 function renderMessage(message: Message): any {
-    if (typeof message.content === 'string') {
-        return { role: message.role, content: message.content };
+    if (message.role === 'tool') {
+        return {
+            role: 'tool',
+            tool_call_id: message.toolCallId,
+            content: contentToText(message.content),
+        };
     }
-    return {
+    const rendered: any = {
         role: message.role,
-        content: message.content.map(renderPart).filter(part => part !== null),
+        content:
+            typeof message.content === 'string'
+                ? message.content
+                : message.content.map(renderPart).filter(part => part !== null),
     };
+    if (message.toolCalls?.length) {
+        rendered.tool_calls = message.toolCalls.map(call => ({
+            id: call.id,
+            type: 'function',
+            function: {
+                name: call.name,
+                arguments: call.arguments,
+            },
+        }));
+    }
+    return rendered;
+}
+
+function renderToolChoice(choice: ToolChoice): unknown {
+    if (typeof choice === 'string') {
+        return choice;
+    }
+    return { type: 'function', function: { name: choice.name } };
 }
 
 export function buildChatCompletionsBody(options: CompletionOptions, stream: boolean): any {
@@ -63,7 +90,7 @@ export function buildChatCompletionsBody(options: CompletionOptions, stream: boo
     if (options.system) {
         messages.unshift({ role: 'system', content: options.system });
     }
-    return {
+    const body: any = {
         ...options.extra,
         model: options.model,
         ...(stream ? { stream: true } : {}),
@@ -73,6 +100,21 @@ export function buildChatCompletionsBody(options: CompletionOptions, stream: boo
         ...(options.stop ? { stop: options.stop } : {}),
         messages: messages.map(renderMessage),
     };
+    if (options.tools?.length) {
+        body.tools = options.tools.map(tool => ({
+            type: 'function',
+            function: {
+                name: tool.name,
+                ...(tool.description ? { description: tool.description } : {}),
+                ...(tool.parameters ? { parameters: tool.parameters } : {}),
+            },
+        }));
+        // tool_choice on validi vain, kun työkaluja on mukana
+        if (options.toolChoice !== undefined) {
+            body.tool_choice = renderToolChoice(options.toolChoice);
+        }
+    }
+    return body;
 }
 
 export function parseChatCompletionsResponse(data: any): CompletionResult {
@@ -83,10 +125,18 @@ export function parseChatCompletionsResponse(data: any): CompletionResult {
     if (!choice) {
         throw new Error('Empty response from provider');
     }
+    const toolCalls: ToolCall[] = Array.isArray(choice.message?.tool_calls)
+        ? choice.message.tool_calls.map((call: any) => ({
+              id: call.id ?? '',
+              name: call.function?.name ?? '',
+              arguments: call.function?.arguments ?? '{}',
+          }))
+        : [];
     return {
         text: contentToText(choice.message?.content),
         usage: toUsage(data?.usage),
         stopReason: choice?.finish_reason ?? null,
+        ...(toolCalls.length ? { toolCalls } : {}),
     };
 }
 
@@ -146,6 +196,7 @@ export class ChatCompletionsClient implements LLMClient {
     }
 
     async *stream(options: CompletionOptions): AsyncIterable<string> {
+        assertNoToolsInStream(options);
         const response = await this.request(options, true);
         for await (const sse of iterSSEMessages(response)) {
             const { delta, finish, error } = parseChatCompletionsSSE(sse);
