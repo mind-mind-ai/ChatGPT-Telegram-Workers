@@ -47,6 +47,37 @@ const SHARE_HANDLER: UpdateHandler[] = [
     ]),
 ];
 
+function isTokenConfigurationError(error: unknown): boolean {
+    return error instanceof Error && error.message === 'Token not allowed';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasValidChat(chat: unknown): boolean {
+    return isRecord(chat) && typeof chat.id === 'number' && chat.id !== 0 && typeof chat.type === 'string';
+}
+
+type InvalidUpdateReason = 'invalid-chat' | 'invalid-context';
+
+function classifyInvalidUpdate(update: Telegram.Update): InvalidUpdateReason | null {
+    if (!isRecord(update)) {
+        return 'invalid-context';
+    }
+    if (update.message !== undefined) {
+        return isRecord(update.message) && hasValidChat(update.message.chat) ? null : 'invalid-chat';
+    }
+    if (isRecord(update.callback_query)) {
+        const callback = update.callback_query;
+        if (!isRecord(callback.from) || typeof callback.from.id !== 'number') {
+            return 'invalid-context';
+        }
+        return isRecord(callback.message) && hasValidChat(callback.message.chat) ? null : 'invalid-chat';
+    }
+    return 'invalid-context';
+}
+
 export async function handleUpdate(token: string, update: Telegram.Update): Promise<Response | null> {
     // 载入全局配置并把宿主环境注入传输层框架
     await ENV.loadConfig();
@@ -55,7 +86,25 @@ export async function handleUpdate(token: string, update: Telegram.Update): Prom
         defaultParseMode: ENV.CONFIG.settings.defaultParseMode,
         renderMessage: ENV.CUSTOM_MESSAGE_RENDER,
     });
-    const context = WorkerContext.from(token, update);
+
+    const invalidReason = classifyInvalidUpdate(update);
+    if (invalidReason) {
+        // Excludes token, message text, sender data, and callback data.
+        console.warn('[telegram] ignored invalid update', { reason: invalidReason });
+        return null;
+    }
+
+    let context: WorkerContext;
+    try {
+        context = WorkerContext.from(token, update);
+    } catch (error) {
+        if (isTokenConfigurationError(error)) {
+            // Fixed reason only; never include the supplied token or env values.
+            console.warn('[telegram] rejected update', { reason: 'token-not-allowed' });
+            return new Response('Forbidden', { status: 403 });
+        }
+        throw error;
+    }
 
     for (const handler of SHARE_HANDLER) {
         try {
