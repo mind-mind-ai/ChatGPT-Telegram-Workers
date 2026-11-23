@@ -1,0 +1,39 @@
+{
+    // Separate Workers Free test Worker. No Containers and no SANDBOX binding.
+    // The only Durable Object is the SQLite-backed coding-session state object,
+    // kept so the shared message handler does not treat every text message as a
+    // coding-backend failure.
+    "$schema": "./node_modules/wrangler/config-schema.json",
+    "name": "chatgpt-telegram-workers-free-test",
+    "main": "./packages/apps/workers/src/index.free-test.ts",
+    "build": { "command": "pnpm -w run build:workers" },
+    "compatibility_date": "2026-08-04",
+    "compatibility_flags": ["nodejs_compat"],
+
+    "durable_objects": {
+        "bindings": [{ "name": "CODING_SESSION", "class_name": "CodingSessionDurableObject" }],
+    },
+    "exports": {
+        "CodingSessionDurableObject": {
+            "type": "durable-object",
+            "storage": "sqlite",
+        },
+    },
+
+    // Plain vars are sourced from this file, so dashboard allowlists cannot
+    // silently enable coding. Secrets are managed separately by Wrangler.
+    "keep_vars": false,
+    "vars": {
+        "GITHUB_APP_ID": "",
+        "GITHUB_INSTALLATION_ID": "",
+        "GITHUB_INSTALLATION_IDS": "",
+        "GITHUB_API_BASE_URL": "",
+        "GITHUB_ALLOWED_REPOSITORIES": "",
+        "GITHUB_ALLOWED_REPOSITORIES_BY_USER": "",
+        "GITHUB_WRITE_ALLOWED_REPOSITORIES": "",
+        "SANDBOX_INTERNET": "false",
+    },
+
+    // Replaced by DEPLOY_FREE_TEST_KV_NAMESPACE_ID in scripts/gen-wrangler-free-test.ts.
+    "kv_namespaces": [{ "binding": "DATABASE", "id": "local" }],
+}

@@ -9,6 +9,8 @@ export interface VitestOptions {
     hashAlias?: boolean;
     /** 需要指向源码的 workspace 包名(不含 scope 前缀),如 ['ai','config'] */
     workspaceDeps?: string[];
+    /** 包含 workspace 包的目录;默认是 root 的父目录。 */
+    workspaceDepsRoot?: string;
 }
 
 /**
@@ -21,10 +23,11 @@ export function createVitestConfig(options: VitestOptions) {
     if (options.hashAlias) {
         alias.push({ find: /^#\/(.*)$/, replacement: `${path.resolve(root, 'src')}/$1` });
     }
+    const workspaceDepsRoot = options.workspaceDepsRoot ?? path.resolve(root, '..');
     for (const dep of options.workspaceDeps || []) {
         alias.push({
             find: `@chatgpt-telegram-workers/${dep}`,
-            replacement: path.resolve(root, `../${dep}/src/index.ts`),
+            replacement: path.resolve(workspaceDepsRoot, dep, 'src/index.ts'),
         });
     }
     return defineConfig({

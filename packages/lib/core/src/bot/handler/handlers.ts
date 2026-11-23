@@ -68,7 +68,7 @@ export function isServiceMessage(message: Telegram.Message): boolean {
 export class ServiceMessageFilter implements UpdateHandler {
     handle = async (update: Telegram.Update, _context: WorkerContext): Promise<Response | null> => {
         if (update.message && isServiceMessage(update.message)) {
-            throw new Error('Ignore service message');
+            return new Response('OK', { status: 200 });
         }
         return null;
     };
@@ -77,7 +77,13 @@ export class ServiceMessageFilter implements UpdateHandler {
 export class EnvChecker implements UpdateHandler {
     handle = async (update: Telegram.Update, context: WorkerContext): Promise<Response | null> => {
         if (!ENV.DATABASE) {
-            return MessageSender.fromUpdate(context.SHARE_CONTEXT.botToken, update).sendPlainText('DATABASE Not Set');
+            try {
+                return await MessageSender.fromUpdate(context.SHARE_CONTEXT.botToken, update).sendPlainText(
+                    'DATABASE Not Set',
+                );
+            } catch {
+                return null;
+            }
         }
         return null;
     };
@@ -89,25 +95,19 @@ export class AccessFilter implements UpdateHandler {
         if (settings.allowAllUsers) {
             return null;
         }
+
+        const message = update.message;
+        const callback = update.callback_query;
+        const chat = message?.chat ?? callback?.message?.chat;
+        const chatType = typeof chat?.type === 'string' ? chat.type : '';
+        const chatID = typeof chat?.id === 'number' ? chat.id : 0;
+        const userID = message?.from?.id ?? callback?.from?.id ?? 0;
+
+        if (!chatType || !chatID || (callback && !userID)) {
+            return null;
+        }
+
         const sender = MessageSender.fromUpdate(context.SHARE_CONTEXT.botToken, update);
-
-        let chatType = '';
-        let chatID = 0;
-        let userID = 0;
-
-        if (update.message) {
-            chatType = update.message.chat.type;
-            chatID = update.message.chat.id;
-            userID = update.message.from?.id || 0;
-        } else if (update.callback_query?.message) {
-            chatType = update.callback_query.message.chat.type;
-            chatID = update.callback_query.message.chat.id;
-            userID = update.callback_query.from.id;
-        }
-
-        if (!chatType || !chatID) {
-            throw new Error('Invalid chat type or chat id');
-        }
         const text = `You are not in the white list, please contact the administrator to add you to the white list. Your chat_id: ${chatID}`;
         const allowedUsers = new Set([...settings.allowedUserIds, ...(ENV.ADMIN_ID ? [ENV.ADMIN_ID] : [])]);
 
@@ -169,16 +169,21 @@ export class CallbackQueryHandler implements UpdateHandler {
         const ok = (): Response => new Response('OK', { status: 200 });
 
         try {
-            const parts = (cb.data || '').split(':');
+            if (typeof cb.data !== 'string') {
+                await answer();
+                return ok();
+            }
+            const parts = cb.data.split(':');
             if (!['m', 'mp', 'im', 'ip', 'ml', 'il'].includes(parts[0])) {
                 await answer();
                 return ok();
             }
             const kind: ModelKind = ['m', 'mp', 'ml'].includes(parts[0]) ? 'chat' : 'image';
+            const callbackChat = cb.message?.chat;
 
             // 群组内切换模型是全局变更,仅限管理员;私聊白名单已由 AccessFilter 把关
-            if (cb.message && isGroupChat(cb.message.chat.type)) {
-                const role = await loadChatRoleWithContext(cb.message.chat.id, cb.from.id, context);
+            if (callbackChat && typeof callbackChat.type === 'string' && isGroupChat(callbackChat.type)) {
+                const role = await loadChatRoleWithContext(callbackChat.id, cb.from?.id ?? 0, context);
                 if (!role || !['administrator', 'creator'].includes(role)) {
                     await answer('No permission');
                     return ok();
@@ -187,10 +192,10 @@ export class CallbackQueryHandler implements UpdateHandler {
 
             const providers = kind === 'image' ? ENV.CONFIG.imageProviders : ENV.CONFIG.chatProviders;
             const edit = (text: string, keyboard: Telegram.InlineKeyboardMarkup): Promise<unknown> =>
-                cb.message
+                cb.message && callbackChat
                     ? api
                           .editMessageText({
-                              chat_id: cb.message.chat.id,
+                              chat_id: callbackChat.id,
                               message_id: cb.message.message_id,
                               text,
                               reply_markup: keyboard,
@@ -427,7 +432,11 @@ export class MessageFilter implements MessageHandler {
 
 export class CommandHandler implements MessageHandler {
     handle = async (message: Telegram.Message, context: WorkerContext): Promise<Response | null> => {
-        if (message.text || message.caption) {
+        const text = message.text ?? message.caption;
+        if (text !== undefined && typeof text !== 'string') {
+            return null;
+        }
+        if (text) {
             return await handleCommandMessage(message, context);
         }
         // 非文本消息不作处理

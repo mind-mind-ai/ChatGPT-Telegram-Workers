@@ -41,11 +41,11 @@ function defaultMessageDependencies(): CodingMessageDependencies {
 
 function privateIdentity(message: Telegram.Message): { userId: string; chatId: string } | null {
     const userId = message.from?.id;
-    const chatId = message.chat.id;
-    if (message.chat.type !== 'private' || !userId || !chatId) {
+    const chat = message.chat;
+    if (chat?.type !== 'private' || !userId || !chat.id) {
         return null;
     }
-    return { userId: `${userId}`, chatId: `${chatId}` };
+    return { userId: `${userId}`, chatId: `${chat.id}` };
 }
 
 function ok(): Response {
@@ -114,17 +114,18 @@ export class CodingCallbackHandler implements UpdateHandler {
 
     handle = async (update: Telegram.Update, context: WorkerContext): Promise<Response | null> => {
         const callback = update.callback_query;
-        if (!callback || !callback.data?.startsWith('code:')) {
+        if (!callback || typeof callback.data !== 'string' || !callback.data.startsWith('code:')) {
             return null;
         }
         const message = callback.message;
         const userId = callback.from?.id;
-        const chatId = message?.chat.id;
+        const chat = message?.chat;
+        const chatId = chat?.id;
         if (!message || !userId || !chatId) {
             return ok();
         }
         const reply = (this.deps?.reply ?? createReplyForUpdate)(context.SHARE_CONTEXT.botToken, update);
-        if (message.chat.type !== 'private') {
+        if (chat.type !== 'private') {
             await reply.answerCallback('Coding sessions are only available in private chats');
             return ok();
         }

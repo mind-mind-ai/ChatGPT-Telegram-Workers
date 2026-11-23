@@ -42,6 +42,7 @@
         "deploy": "pnpm run version && wrangler deploy",
         "deploy:builds": "pnpm run version && tsx scripts/gen-wrangler-deploy.ts && wrangler deploy --config wrangler.deploy.jsonc",
         "deploy:preview": "pnpm run version && tsx scripts/gen-wrangler-deploy.ts && wrangler versions upload --config wrangler.deploy.jsonc",
+        "deploy:free-test": "pnpm run version && tsx scripts/gen-wrangler-free-test.ts && wrangler deploy --config wrangler.free-test.deploy.jsonc",
         "deploy:workers": "WRANGLER_PATH=$INIT_CWD/wrangler.jsonc pnpm run --filter @chatgpt-telegram-workers/workers deploy",
         "deploy:vercel": "pnpm run build:server && vercel --prod",
         "start:local": "pnpm run build:server && CONFIG_PATH=$INIT_CWD/config.json WRANGLER_PATH=$INIT_CWD/wrangler.jsonc pnpm run --filter @chatgpt-telegram-workers/server start",

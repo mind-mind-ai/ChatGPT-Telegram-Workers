@@ -149,6 +149,7 @@ out
 .wrangler
 config.json
 wrangler.deploy.jsonc
+wrangler.free-test.deploy.jsonc
 /dist/index.cjs
 /dist/index.d.ts
 /dist/src

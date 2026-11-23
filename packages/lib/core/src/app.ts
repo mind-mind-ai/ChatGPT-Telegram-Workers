@@ -177,7 +177,7 @@ function pageInfo(domain: string): Record<string, unknown> {
 }
 
 /** 解析 /telegram/{token}/{webhook|safehook},避免引入路由框架。 */
-function matchTelegramHook(pathname: string): { token: string; safe: boolean } | null {
+export function matchTelegramHook(pathname: string): { token: string; safe: boolean } | null {
     const parts = pathname.split('/').filter(Boolean);
     if (parts.length !== 3 || parts[0] !== 'telegram') {
         return null;
@@ -185,7 +185,11 @@ function matchTelegramHook(pathname: string): { token: string; safe: boolean } |
     if (parts[2] !== 'webhook' && parts[2] !== 'safehook') {
         return null;
     }
-    return { token: decodeURIComponent(parts[1]), safe: parts[2] === 'safehook' };
+    try {
+        return { token: decodeURIComponent(parts[1]), safe: parts[2] === 'safehook' };
+    } catch {
+        return null;
+    }
 }
 
 /**

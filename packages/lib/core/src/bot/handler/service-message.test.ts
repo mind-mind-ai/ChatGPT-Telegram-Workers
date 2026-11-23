@@ -64,7 +64,9 @@ describe('ServiceMessageFilter', () => {
     it('short-circuits updates carrying a service message', async () => {
         const filter = new ServiceMessageFilter();
         const update = { update_id: 1, message: message({ new_chat_members: [] }) } as Telegram.Update;
-        await expect(filter.handle(update, {} as any)).rejects.toThrow('Ignore service message');
+        const response = await filter.handle(update, {} as any);
+        expect(response?.status).toBe(200);
+        await expect(response?.text()).resolves.toBe('OK');
     });
 
     it('passes through normal text and non-message updates', async () => {

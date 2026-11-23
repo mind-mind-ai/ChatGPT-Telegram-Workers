@@ -11,18 +11,33 @@ export class Update2MessageHandler<Context = unknown> implements UpdateHandler<C
         this.messageHandlers = messageHandlers;
     }
 
-    loadMessage(body: Telegram.Update): Telegram.Message {
-        if (body.edited_message) {
-            throw new Error('Ignore edited message');
+    loadMessage(body: Telegram.Update): Telegram.Message | null {
+        if (body.edited_message || !body.message || typeof body.message !== 'object') {
+            return null;
         }
-        if (body.message) {
-            return body.message;
+        const message = body.message as unknown as Record<string, unknown>;
+        const chat = message.chat;
+        if (!chat || typeof chat !== 'object') {
+            return null;
         }
-        throw new Error('Invalid message');
+        const chatRecord = chat as Record<string, unknown>;
+        if (typeof chatRecord.id !== 'number' || chatRecord.id === 0 || typeof chatRecord.type !== 'string') {
+            return null;
+        }
+        if (message.text !== undefined && typeof message.text !== 'string') {
+            return null;
+        }
+        if (message.caption !== undefined && typeof message.caption !== 'string') {
+            return null;
+        }
+        return body.message;
     }
 
     handle = async (update: Telegram.Update, context: Context): Promise<Response | null> => {
         const message = this.loadMessage(update);
+        if (!message) {
+            return null;
+        }
         for (const handler of this.messageHandlers) {
             const result = await handler.handle(message, context);
             if (result) {

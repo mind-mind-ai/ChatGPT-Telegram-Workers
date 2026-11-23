@@ -9,6 +9,7 @@ import { isGroupChat } from '../auth';
 import { loadChatRoleWithContext } from './auth';
 import { applyConfigShortcut, isConfigShortcutValue, parseConfigShortcut } from './env-shortcut';
 import { MENU_COMMANDS } from './menu-commands';
+import { isCodingCommandText } from './coding-command';
 import { CodeCommandHandler, CodeStatusCommandHandler, CodeStopCommandHandler } from './coding';
 import {
     AdminCommandHandler,
@@ -223,6 +224,10 @@ export async function handleCommandMessage(
             if (isConfigShortcutValue(custom.value)) {
                 return await handleConfigShortcut(message, custom.value, context);
             }
+            // Custom commands must not be able to escalate into coding commands.
+            if (isCodingCommandText(custom.value)) {
+                return null;
+            }
             text = custom.value;
             break;
         }
@@ -274,6 +279,8 @@ export async function handleCommandMessage(
     }
     return null;
 }
+
+export { isCodingCommandText } from './coding-command';
 
 export function commandsBindScope(): Record<string, Telegram.SetMyCommandsParams> {
     const scopeCommandMap: Record<string, Telegram.BotCommand[]> = {
